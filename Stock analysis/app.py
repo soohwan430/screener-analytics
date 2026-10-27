@@ -431,17 +431,28 @@ def add_sgx_links(df):
 def stock_table_config(columns):
     """Combine existing numeric formatting with a clickable link column."""
     config = display_config(columns)
+    if "Company" in columns:
+        config["Company"] = st.column_config.TextColumn("Company", width="medium")
+    if "SGX Code" in columns:
+        config["SGX Code"] = st.column_config.TextColumn("Ticker", width="small")
+    if "Rank" in columns:
+        config["Rank"] = st.column_config.NumberColumn("#", width="small", format="%d")
     if "SGX Link" in columns:
         config["SGX Link"] = st.column_config.LinkColumn(
-            "SGX Link", display_text="View on SGX",
+            "SGX", display_text="Open ↗", width="small",
             help="Open this security's profile on SGX in a new tab.",
         )
     return config
 
 
-def show_stock_table(df, *, height=None):
+def show_stock_table(df, *, height=None, compact=False):
     """Shared display path for all company-containing dataframes."""
     linked = add_sgx_links(df)
+    if compact and "SGX Link" in linked.columns:
+        # Ranking panels are half-width: keep the name, metric and link visible.
+        linked = linked.drop(columns=["SGX Code"], errors="ignore")
+        ordered = [c for c in linked.columns if c != "SGX Link"] + ["SGX Link"]
+        linked = linked[ordered]
     kwargs = dict(
         column_config=stock_table_config(linked.columns),
         hide_index=True,
@@ -777,7 +788,7 @@ def category_comparison_plot(groups, metric, scale="Focused (readable)"):
 
 
 def peer_table(df, selected_code=None, key="peer"):
-    """Show peers and emphasize the selected stock using Pandas Styler."""
+    """Display linked stock data and highlight the searched security."""
     if df.empty:
         st.info("No stocks to display.")
         return
@@ -787,27 +798,24 @@ def peer_table(df, selected_code=None, key="peer"):
         df["_selected"] = df["SGX Code"].map(normalized_code).eq(selected_code)
         df = df.sort_values(["_selected", "Company"], ascending=[False, True])
         flags = df.pop("_selected")
-        styled = style_stock_table(df)
-        # Preserve existing conditional formatting while bolding selected row.
-        styled = styled.apply(
-            lambda row: ["font-weight: 800; background-color: #FFF1C7" if flags.loc[row.name] else "" for _ in row],
-            axis=1,
-        )
-    else:
-        styled = style_stock_table(df)
-    # Reapply the existing conditional styling after inserting the SGX link.
     linked_df = add_sgx_links(df)
     styled = style_stock_table(linked_df)
     if selected_code:
         styled = styled.apply(
-            lambda row: ["font-weight: 800; background-color: #FFF1C7" if flags.loc[row.name] else "" for _ in row],
-            axis=1,
+            lambda row: [
+                "font-weight: 800; background-color: #FFF1C7"
+                if flags.loc[row.name] else "" for _ in row
+            ], axis=1,
         )
-    st.dataframe(styled, column_config=stock_table_config(linked_df.columns),
-                 hide_index=True, use_container_width=True, height=520)
-    st.download_button("Download displayed table (CSV)",
-                       linked_df.to_csv(index=False).encode("utf-8-sig"),
-                       file_name=f"sgx_{key}.csv", mime="text/csv", key=f"download_{key}")
+    st.dataframe(
+        styled, column_config=stock_table_config(linked_df.columns),
+        hide_index=True, use_container_width=True, height=520,
+    )
+    st.download_button(
+        "Download displayed table (CSV)",
+        linked_df.to_csv(index=False).encode("utf-8-sig"),
+        file_name=f"sgx_{key}.csv", mime="text/csv", key=f"download_{key}",
+    )
 
 
 def category_data(df):
@@ -1267,7 +1275,7 @@ def market_explorer_page():
                     subset = valid.sort_values(column, ascending=ascending).head(10)
                     table = subset[["Company", "SGX Code", column]].reset_index(drop=True)
                     table.insert(0, "Rank", range(1, len(table) + 1))
-                    show_stock_table(table)
+                    show_stock_table(table, compact=True, height=390)
             st.divider()
 
         st.subheader("Full Stock Table")
