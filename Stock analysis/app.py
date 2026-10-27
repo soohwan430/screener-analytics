@@ -594,90 +594,228 @@ with st.expander("Index data sources and classification methodology", expanded=F
 if date.today() >= date(2026, 12, 1):
     st.warning("Index membership snapshot may be outdated: December 2026 review is due. Update STI_CODES and NEXT50_CODES after verifying official changes.")
 
-st.header("Company Search & Sector Peers")
-query = st.text_input("Search company name or SGX ticker", placeholder="DBS, CapitaLand, D05...")
-if query.strip():
-    matched = full_df[
-        full_df["Company"].astype(str).str.contains(query.strip(), case=False, na=False, regex=False)
-        | full_df["SGX Code"].astype(str).str.contains(query.strip(), case=False, na=False, regex=False)
+# ============================================================
+# INDEPENDENT NAVIGATION PAGES
+# ============================================================
+
+
+def company_search_page():
+    st.header("Company Search & Sector Peers")
+    query = st.text_input("Search company name or SGX ticker", placeholder="DBS, CapitaLand, D05...")
+    if query.strip():
+        matched = full_df[
+            full_df["Company"].astype(str).str.contains(query.strip(), case=False, na=False, regex=False)
+            | full_df["SGX Code"].astype(str).str.contains(query.strip(), case=False, na=False, regex=False)
+        ]
+        if matched.empty:
+            st.info("No matching company or ticker found.")
+        else:
+            options = matched.index.tolist()
+            chosen = st.selectbox("Choose a company", options,
+                format_func=lambda i: f"{full_df.at[i, 'Company']} ({full_df.at[i, 'SGX Code']})")
+            selected = full_df.loc[chosen]
+            sector = selected["Sector"]
+            peers = full_df[full_df["Sector"] == sector].copy()
+            st.subheader(f"{selected['Company']} ({selected['SGX Code']})")
+            st.caption(f"Sector: {sector} · {len(peers)} companies · Selected stock highlighted in bold")
+            peer_table(peers, selected["SGX Code"], "search_peers")
+            with st.expander("Peer group statistics"):
+                st.dataframe(summary_table(peers), hide_index=True, use_container_width=True)
+
+
+
+def market_explorer_page():
+    st.header("SGX Sector & Market Explorer")
+    st.caption("Browse by market size/index or by industry. Index membership uses September 2026 snapshots.")
+    groups = category_data(full_df)
+    size_names = ["All SGX", "STI", "iEdge Next 50", "Large Cap", "Mid Cap", "Small Cap", "Micro Cap"]
+    industry_names = [name for name in groups if name.startswith("Sector: ")]
+
+    by_size_tab, by_industry_tab = st.tabs(["By Size & Index", "By Industry"])
+
+    for section, tab, names in (
+        ("size", by_size_tab, size_names),
+        ("industry", by_industry_tab, industry_names),
+    ):
+        with tab:
+            choices = [name for name in names if name in groups]
+            if not choices:
+                st.info("No categories available.")
+                continue
+            selected_name = st.selectbox(
+                "Choose a market category" if section == "size" else "Choose an industry sector",
+                choices,
+                format_func=lambda name: f"{name.removeprefix('Sector: ')} ({len(groups[name]):,})",
+                key=f"explorer_select_{section}",
+            )
+            data = groups[selected_name]
+            st.subheader(selected_name.removeprefix("Sector: "))
+            st.metric("SGX records", f"{len(data):,}")
+            if selected_name in ("STI", "iEdge Next 50"):
+                expected = 30 if selected_name == "STI" else 50
+                if len(data) != expected:
+                    st.warning(
+                        f"Matched {len(data)} of {expected} snapshot tickers in the SGX screener. "
+                        "Unmatched stocks are excluded from statistics."
+                    )
+            if data.empty:
+                st.info("No records in this category.")
+                continue
+            st.subheader("Category Statistics")
+            st.dataframe(summary_table(data), hide_index=True, use_container_width=True)
+            show_sector_rankings(data, key_prefix=f"category_{section}")
+            st.subheader("Full Stock Table")
+            filter_text = st.text_input("Filter company or ticker", key=f"filter_{section}")
+            visible = data
+            if filter_text:
+                visible = data[
+                    data["Company"].astype(str).str.contains(filter_text, case=False, na=False, regex=False)
+                    | data["SGX Code"].astype(str).str.contains(filter_text, case=False, na=False, regex=False)
+                ]
+            st.write(f"Showing **{len(visible):,}** records")
+            peer_table(visible, key=f"category_{section}")
+
+    st.header("Cross-Category Statistical Comparison")
+    st.caption("Each row is a sector or market category. Index membership overlaps with sector and cap-tier groups. Counts are based on available SGX screener records.")
+    metric_options = numeric_metrics(full_df)
+    if metric_options:
+        metric = st.selectbox("Choose financial metric", metric_options, index=metric_options.index("P/E") if "P/E" in metric_options else 0)
+        rows = []
+        for name, data in groups.items():
+            v = pd.to_numeric(data[metric], errors="coerce").replace([float("inf"), float("-inf")], float("nan")).dropna()
+            rows.append({"Category": name, "Stocks": len(data), "Valid N": len(v),
+                         "Mean": v.mean(), "Median": v.median(),
+                         "25th Percentile": v.quantile(.25), "75th Percentile": v.quantile(.75)})
+        stats = pd.DataFrame(rows).round(2)
+        st.dataframe(stats, hide_index=True, use_container_width=True)
+        st.download_button("Download comparison CSV", stats.to_csv(index=False).encode("utf-8-sig"),
+                           file_name="sgx_category_statistics.csv", mime="text/csv")
+
+
+
+
+# ============================================================
+# SGX-STYLE ADVANCED STOCK FILTER
+# ============================================================
+
+def stock_filter_page():
+    st.header("SGX Stock Filter")
+    st.caption("Select the filters you want to apply. All enabled filters must match. Values use the units shown in the SGX stock table.")
+
+    filter_metrics = [
+        ("Revenue TTM (M)", "Total Revenue (M)"),
+        ("Market Cap (M)", "Market Cap (M)"),
+        ("P/E", "P/E"),
+        ("Dividend Yield (%)", "Dividend Yield (%)"),
+        ("4W Change (%)", "4-Week Price Change (%)"),
+        ("13W Change (%)", "13-Week Price Change (%)"),
+        ("26W Change (%)", "26-Week Price Change (%)"),
+        ("52W Change (%)", "52-Week Price Change (%)"),
+        ("Net Profit Margin (%)", "Net Profit Margin (%)"),
+        ("ROE (%)", "ROE (%)"),
+        ("P/B", "Price / Book"),
+        ("Price/CF", "Price / Cash Flow"),
+        ("Debt/Equity", "Debt / Equity"),
+        ("Revenue Growth (%)", "Revenue Growth (%)"),
     ]
-    if matched.empty:
-        st.info("No matching company or ticker found.")
-    else:
-        options = matched.index.tolist()
-        chosen = st.selectbox("Choose a company", options,
-            format_func=lambda i: f"{full_df.at[i, 'Company']} ({full_df.at[i, 'SGX Code']})")
-        selected = full_df.loc[chosen]
-        sector = selected["Sector"]
-        peers = full_df[full_df["Sector"] == sector].copy()
-        st.subheader(f"{selected['Company']} ({selected['SGX Code']})")
-        st.caption(f"Sector: {sector} · {len(peers)} companies · Selected stock highlighted in bold")
-        peer_table(peers, selected["SGX Code"], "search_peers")
-        with st.expander("Peer group statistics"):
-            st.dataframe(summary_table(peers), hide_index=True, use_container_width=True)
 
-st.header("SGX Sector & Market Explorer")
-st.caption("Browse by market size/index or by industry. Index membership uses September 2026 snapshots.")
-groups = category_data(full_df)
-size_names = ["All SGX", "STI", "iEdge Next 50", "Large Cap", "Mid Cap", "Small Cap", "Micro Cap"]
-industry_names = [name for name in groups if name.startswith("Sector: ")]
+    panel, results_panel = st.columns([1, 3], gap="large")
+    conditions = []
+    selected_sectors = []
+    sector_enabled = False
 
-by_size_tab, by_industry_tab = st.tabs(["By Size & Index", "By Industry"])
-
-for section, tab, names in (
-    ("size", by_size_tab, size_names),
-    ("industry", by_industry_tab, industry_names),
-):
-    with tab:
-        choices = [name for name in names if name in groups]
-        if not choices:
-            st.info("No categories available.")
-            continue
-        selected_name = st.selectbox(
-            "Choose a market category" if section == "size" else "Choose an industry sector",
-            choices,
-            format_func=lambda name: f"{name.removeprefix('Sector: ')} ({len(groups[name]):,})",
-            key=f"explorer_select_{section}",
+    with panel:
+        st.subheader("Filter by")
+        sector_enabled = st.checkbox("Sector", key="screen_sector_enabled")
+        sectors = sorted(full_df["Sector"].dropna().astype(str).unique().tolist())
+        selected_sectors = st.multiselect(
+            "Choose sectors", sectors, disabled=not sector_enabled,
+            placeholder="All sectors" if not sector_enabled else "Select sectors",
+            key="screen_sectors",
         )
-        data = groups[selected_name]
-        st.subheader(selected_name.removeprefix("Sector: "))
-        st.metric("SGX records", f"{len(data):,}")
-        if selected_name in ("STI", "iEdge Next 50"):
-            expected = 30 if selected_name == "STI" else 50
-            if len(data) != expected:
-                st.warning(
-                    f"Matched {len(data)} of {expected} snapshot tickers in the SGX screener. "
-                    "Unmatched stocks are excluded from statistics."
-                )
-        if data.empty:
-            st.info("No records in this category.")
-            continue
-        show_sector_rankings(data, key_prefix=f"category_{section}")
-        st.subheader("Full Stock Table")
-        filter_text = st.text_input("Filter company or ticker", key=f"filter_{section}")
-        visible = data
-        if filter_text:
-            visible = data[
-                data["Company"].astype(str).str.contains(filter_text, case=False, na=False, regex=False)
-                | data["SGX Code"].astype(str).str.contains(filter_text, case=False, na=False, regex=False)
-            ]
-        st.write(f"Showing **{len(visible):,}** records")
-        peer_table(visible, key=f"category_{section}")
-        st.subheader("Category Statistics")
-        st.dataframe(summary_table(data), hide_index=True, use_container_width=True)
+        st.divider()
 
-st.header("Cross-Category Statistical Comparison")
-st.caption("Each row is a sector or market category. Index membership overlaps with sector and cap-tier groups. Counts are based on available SGX screener records.")
-metric_options = numeric_metrics(full_df)
-if metric_options:
-    metric = st.selectbox("Choose financial metric", metric_options, index=metric_options.index("P/E") if "P/E" in metric_options else 0)
-    rows = []
-    for name, data in groups.items():
-        v = pd.to_numeric(data[metric], errors="coerce").replace([float("inf"), float("-inf")], float("nan")).dropna()
-        rows.append({"Category": name, "Stocks": len(data), "Valid N": len(v),
-                     "Mean": v.mean(), "Median": v.median(),
-                     "25th Percentile": v.quantile(.25), "75th Percentile": v.quantile(.75)})
-    stats = pd.DataFrame(rows).round(2)
-    st.dataframe(stats, hide_index=True, use_container_width=True)
-    st.download_button("Download comparison CSV", stats.to_csv(index=False).encode("utf-8-sig"),
-                       file_name="sgx_category_statistics.csv", mime="text/csv")
+        for col, label in filter_metrics:
+            if col not in full_df.columns:
+                continue
+            series = pd.to_numeric(full_df[col], errors="coerce")
+            series = series.replace([float("inf"), float("-inf")], float("nan")).dropna()
+            if series.empty:
+                continue
+            low = float(series.min())
+            high = float(series.max())
+            enabled = st.checkbox(label, key=f"screen_on_{col}")
+            lower_col, upper_col = st.columns(2)
+            with lower_col:
+                lower_text = st.text_input(
+                    "Minimum", placeholder=f"{low:,.2f}",
+                    disabled=not enabled, key=f"screen_min_{col}",
+                    label_visibility="visible",
+                )
+            with upper_col:
+                upper_text = st.text_input(
+                    "Maximum", placeholder=f"{high:,.2f}",
+                    disabled=not enabled, key=f"screen_max_{col}",
+                    label_visibility="visible",
+                )
+            if enabled:
+                try:
+                    minimum = float(lower_text.replace(",", "")) if lower_text.strip() else None
+                    maximum = float(upper_text.replace(",", "")) if upper_text.strip() else None
+                    if minimum is not None and maximum is not None and minimum > maximum:
+                        st.warning(f"{label}: minimum exceeds maximum.")
+                    conditions.append((col, minimum, maximum))
+                except ValueError:
+                    st.warning(f"{label}: enter a valid number.")
+                    conditions.append((col, float("inf"), float("-inf")))
+            st.divider()
+
+        if st.button("Clear all filters", key="screen_clear_filters"):
+            for key in list(st.session_state):
+                if key.startswith("screen_") and key != "screen_clear_filters":
+                    del st.session_state[key]
+            st.rerun()
+
+    with results_panel:
+        filtered = full_df.copy()
+        if sector_enabled and selected_sectors:
+            filtered = filtered[filtered["Sector"].isin(selected_sectors)]
+        for col, minimum, maximum in conditions:
+            values = pd.to_numeric(filtered[col], errors="coerce")
+            if minimum is not None:
+                filtered = filtered.loc[values >= minimum]
+                values = pd.to_numeric(filtered[col], errors="coerce")
+            if maximum is not None:
+                filtered = filtered.loc[values <= maximum]
+
+        st.subheader("Filtered SGX Stocks")
+        st.metric("Matching stocks", f"{len(filtered):,}")
+        st.caption(f"{len(filtered):,} of {len(full_df):,} SGX stocks match your active filters.")
+        search_text = st.text_input("Search results by company or ticker", key="screen_results_search")
+        if search_text.strip():
+            term = search_text.strip()
+            filtered = filtered[
+                filtered["Company"].astype(str).str.contains(term, case=False, regex=False, na=False)
+                | filtered["SGX Code"].astype(str).str.contains(term, case=False, regex=False, na=False)
+            ]
+        if filtered.empty:
+            st.info("No stocks match these filters. Widen the ranges or clear some filters.")
+        else:
+            peer_table(filtered, key="advanced_filter")
+            with st.expander("Statistics for filtered stocks"):
+                st.dataframe(summary_table(filtered), hide_index=True, use_container_width=True)
+
+
+# Shared SGX data is stored in session state and reused across pages.
+# The browser fetch happens only when Refresh SGX Data is clicked.
+pg = st.navigation(
+    {
+        "Research Tools": [
+            st.Page(company_search_page, title="Company Search & Sector Peers", icon="🔎", default=True),
+            st.Page(market_explorer_page, title="SGX Sector & Market Explorer", icon="📊"),
+            st.Page(stock_filter_page, title="SGX Stock Filter", icon="🎛️"),
+        ]
+    },
+    position="sidebar",
+)
+pg.run()
