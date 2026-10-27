@@ -617,31 +617,52 @@ if query.strip():
             st.dataframe(summary_table(peers), hide_index=True, use_container_width=True)
 
 st.header("SGX Sector & Market Explorer")
-st.caption("Index tabs use September 2026 membership snapshots. Market-cap tiers are custom SGD thresholds.")
+st.caption("Browse by market size/index or by industry. Index membership uses September 2026 snapshots.")
 groups = category_data(full_df)
-labels = [f"{name} ({len(data):,})" for name, data in groups.items()]
-tabs = st.tabs(labels)
-for idx, ((name, data), tab) in enumerate(zip(groups.items(), tabs)):
+size_names = ["All SGX", "STI", "iEdge Next 50", "Large Cap", "Mid Cap", "Small Cap", "Micro Cap"]
+industry_names = [name for name in groups if name.startswith("Sector: ")]
+
+by_size_tab, by_industry_tab = st.tabs(["By Size & Index", "By Industry"])
+
+for section, tab, names in (
+    ("size", by_size_tab, size_names),
+    ("industry", by_industry_tab, industry_names),
+):
     with tab:
-        st.subheader(name)
+        choices = [name for name in names if name in groups]
+        if not choices:
+            st.info("No categories available.")
+            continue
+        selected_name = st.selectbox(
+            "Choose a market category" if section == "size" else "Choose an industry sector",
+            choices,
+            format_func=lambda name: f"{name.removeprefix('Sector: ')} ({len(groups[name]):,})",
+            key=f"explorer_select_{section}",
+        )
+        data = groups[selected_name]
+        st.subheader(selected_name.removeprefix("Sector: "))
         st.metric("SGX records", f"{len(data):,}")
-        if name in ("STI", "iEdge Next 50"):
-            expected = 30 if name == "STI" else 50
+        if selected_name in ("STI", "iEdge Next 50"):
+            expected = 30 if selected_name == "STI" else 50
             if len(data) != expected:
-                st.warning(f"Matched {len(data)} of {expected} snapshot tickers in the SGX screener. Missing counters are not included in the statistics.")
+                st.warning(
+                    f"Matched {len(data)} of {expected} snapshot tickers in the SGX screener. "
+                    "Unmatched stocks are excluded from statistics."
+                )
         if data.empty:
             st.info("No records in this category.")
             continue
-        show_sector_rankings(data, key_prefix=f"category_{idx}")
+        show_sector_rankings(data, key_prefix=f"category_{section}")
         st.subheader("Full Stock Table")
-        filter_text = st.text_input("Filter company or ticker", key=f"filter_{idx}")
+        filter_text = st.text_input("Filter company or ticker", key=f"filter_{section}")
         visible = data
         if filter_text:
             visible = data[
                 data["Company"].astype(str).str.contains(filter_text, case=False, na=False, regex=False)
-                | data["SGX Code"].astype(str).str.contains(filter_text, case=False, na=False, regex=False)]
+                | data["SGX Code"].astype(str).str.contains(filter_text, case=False, na=False, regex=False)
+            ]
         st.write(f"Showing **{len(visible):,}** records")
-        peer_table(visible, key=f"category_{idx}")
+        peer_table(visible, key=f"category_{section}")
         st.subheader("Category Statistics")
         st.dataframe(summary_table(data), hide_index=True, use_container_width=True)
 
