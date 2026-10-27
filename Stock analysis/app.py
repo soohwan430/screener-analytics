@@ -520,21 +520,32 @@ def summary_table(df):
 
 
 
-def boxplot_dashboard(df, key_prefix="stats"):
-    """Compact vertical boxplots for every available financial metric."""
+def boxplot_dashboard(df, key_prefix="stats", selected_code=None):
+    """Readable vertical distributions with optional highlighted company."""
     metrics = numeric_metrics(df)
     if df.empty or not metrics:
         st.info("No numeric observations available for boxplots.")
         return
 
-    st.caption(
-        "Each plot has its own vertical scale. The box covers the 25th–75th "
-        "percentiles, with the median inside; whiskers use the 1.5×IQR rule. "
-        "Hover over plotted observations for company details."
+    view = st.radio(
+        "Chart scale", ["Focused (readable)", "Full range (all outliers)"],
+        horizontal=True, key=f"{key_prefix}_scale",
+        help="Focused view zooms to the boxplot whiskers. Outliers beyond the axis are hidden, but remain in the calculations.",
     )
-    for start in range(0, len(metrics), 4):
-        cols = st.columns(4, gap="small")
-        for offset, metric in enumerate(metrics[start:start + 4]):
+    st.caption(
+        "The box shows the 25th–75th percentiles and the line shows the median. "
+        "Orange X = searched company. Focused view may hide distant outliers; "
+        "switch to Full range to inspect all observations."
+    )
+    selected_row = None
+    if selected_code is not None and "SGX Code" in df.columns:
+        matches = df.loc[df["SGX Code"].astype(str) == str(selected_code)]
+        if not matches.empty:
+            selected_row = matches.iloc[0]
+
+    for start in range(0, len(metrics), 3):
+        cols = st.columns(3, gap="medium")
+        for offset, metric in enumerate(metrics[start:start + 3]):
             with cols[offset]:
                 values = pd.to_numeric(df[metric], errors="coerce").replace(
                     [float("inf"), float("-inf")], float("nan")
@@ -543,8 +554,8 @@ def boxplot_dashboard(df, key_prefix="stats"):
                 subset = df.loc[valid]
                 numbers = values.loc[valid]
                 st.markdown(
-                    f"<div style='text-align:center;font-size:12px;font-weight:600;"
-                    f"margin:0 0 -8px 0'>{escape(metric)}</div>",
+                    f"<div style='text-align:center;font-size:13px;font-weight:650;"
+                    f"margin:0 0 -5px 0'>{escape(metric)}</div>",
                     unsafe_allow_html=True,
                 )
                 if numbers.empty:
@@ -552,28 +563,65 @@ def boxplot_dashboard(df, key_prefix="stats"):
                     continue
                 fig = go.Figure()
                 fig.add_trace(go.Box(
-                    y=numbers.tolist(),
-                    name=metric,
-                    boxpoints="outliers",
-                    marker=dict(color="#E45752", size=4),
-                    line=dict(color="#168A83", width=1.5),
-                    fillcolor="rgba(22,138,131,0.20)",
+                    y=numbers.tolist(), x=["Peers"] * len(numbers),
+                    name="Peers", boxpoints="outliers",
+                    marker=dict(color="#E45752", size=5),
+                    line=dict(color="#168A83", width=2),
+                    fillcolor="rgba(22,138,131,0.25)",
                     customdata=subset[["Company", "SGX Code"]].astype(str).values,
                     hovertemplate=(
                         "%{customdata[0]} (%{customdata[1]})<br>"
                         + escape(metric) + ": %{y:,.2f}<extra></extra>"
-                    ),
-                    showlegend=False,
+                    ), showlegend=False,
                 ))
+                selected_value = None
+                if selected_row is not None:
+                    selected_value = pd.to_numeric(
+                        pd.Series([selected_row[metric]]), errors="coerce"
+                    ).iloc[0]
+                    if pd.notna(selected_value) and pd.api.types.is_number(selected_value):
+                        fig.add_trace(go.Scatter(
+                            x=["Peers"], y=[float(selected_value)], mode="markers",
+                            name="Searched company",
+                            marker=dict(symbol="x", size=19, color="#E87520", line=dict(width=3, color="#E87520")),
+                            hovertemplate=(
+                                escape(str(selected_row["Company"])) + " ("
+                                + escape(str(selected_code)) + ")<br>"
+                                + escape(metric) + ": %{y:,.2f}<extra>Selected</extra>"
+                            ), showlegend=False,
+                        ))
+                    else:
+                        st.caption("Selected company: N/A")
+
+                axis = dict(tickfont=dict(size=10), nticks=5, zeroline=False,
+                            gridcolor="rgba(128,128,128,0.15)", automargin=True)
+                if view.startswith("Focused") and len(numbers) >= 4:
+                    q1, q3 = numbers.quantile([.25, .75])
+                    iqr = q3 - q1
+                    if iqr > 0:
+                        lower = float(q1 - 1.5 * iqr)
+                        upper = float(q3 + 1.5 * iqr)
+                    else:
+                        lower, upper = float(numbers.quantile(.05)), float(numbers.quantile(.95))
+                    if lower == upper:
+                        pad = max(abs(lower) * .1, 1)
+                        lower -= pad
+                        upper += pad
+                    # Keep the searched stock visible even when outside the usual whiskers.
+                    if selected_value is not None and pd.notna(selected_value):
+                        lower = min(lower, float(selected_value))
+                        upper = max(upper, float(selected_value))
+                    pad = (upper - lower) * .08
+                    axis["range"] = [lower - pad, upper + pad]
                 fig.update_layout(
-                    height=151,
-                    margin=dict(l=4, r=4, t=8, b=3),
+                    height=245,
+                    margin=dict(l=8, r=8, t=12, b=8),
                     xaxis=dict(showticklabels=False, showgrid=False, zeroline=False),
-                    yaxis=dict(tickfont=dict(size=9), nticks=4, zeroline=False,
-                               gridcolor="rgba(128,128,128,0.12)"),
+                    yaxis=axis,
                     paper_bgcolor="rgba(0,0,0,0)",
                     plot_bgcolor="rgba(0,0,0,0)",
-                    font=dict(size=10),
+                    font=dict(size=11),
+                    hovermode="closest",
                 )
                 st.plotly_chart(
                     fig, use_container_width=True,
@@ -698,7 +746,7 @@ def company_search_page():
             st.caption(f"Sector: {sector} · {len(peers)} companies · Selected stock highlighted in bold")
             peer_table(peers, selected["SGX Code"], "search_peers")
             st.subheader("Peer Group Distributions")
-            boxplot_dashboard(peers, key_prefix="company_peers")
+            boxplot_dashboard(peers, key_prefix="company_peers", selected_code=selected["SGX Code"])
 
 
 
