@@ -404,6 +404,55 @@ def clean_sgx_data(raw_data):
 # TABLE NUMBER FORMATTING
 # ============================================================
 
+# ============================================================
+# SGX SECURITY LINKS — APPLIED TO EVERY STOCK TABLE
+# ============================================================
+
+SGX_SECURITY_BASE = "https://investors.sgx.com/market/security-details/stocks/"
+
+
+def add_sgx_links(df):
+    """Insert an SGX security-profile link after each stock ticker."""
+    result = df.copy()
+    if "SGX Code" not in result.columns:
+        return result
+
+    codes = result["SGX Code"].astype("string").str.strip().str.upper()
+    codes = codes.str.replace(r"\.SI$|-SG$", "", regex=True)
+    valid = codes.str.fullmatch(r"[A-Z0-9]+", na=False)
+    urls = (SGX_SECURITY_BASE + codes).where(valid, None)
+    if "SGX Link" in result.columns:
+        result = result.drop(columns=["SGX Link"])
+    insert_at = result.columns.get_loc("SGX Code") + 1
+    result.insert(insert_at, "SGX Link", urls)
+    return result
+
+
+def stock_table_config(columns):
+    """Combine existing numeric formatting with a clickable link column."""
+    config = display_config(columns)
+    if "SGX Link" in columns:
+        config["SGX Link"] = st.column_config.LinkColumn(
+            "SGX Link", display_text="View on SGX",
+            help="Open this security's profile on SGX in a new tab.",
+        )
+    return config
+
+
+def show_stock_table(df, *, height=None):
+    """Shared display path for all company-containing dataframes."""
+    linked = add_sgx_links(df)
+    kwargs = dict(
+        column_config=stock_table_config(linked.columns),
+        hide_index=True,
+        use_container_width=True,
+    )
+    if height is not None:
+        kwargs["height"] = height
+    st.dataframe(style_stock_table(linked), **kwargs)
+    return linked
+
+
 def display_config(columns):
 
     config = {}
@@ -746,10 +795,18 @@ def peer_table(df, selected_code=None, key="peer"):
         )
     else:
         styled = style_stock_table(df)
-    st.dataframe(styled, column_config=display_config(df.columns),
+    # Reapply the existing conditional styling after inserting the SGX link.
+    linked_df = add_sgx_links(df)
+    styled = style_stock_table(linked_df)
+    if selected_code:
+        styled = styled.apply(
+            lambda row: ["font-weight: 800; background-color: #FFF1C7" if flags.loc[row.name] else "" for _ in row],
+            axis=1,
+        )
+    st.dataframe(styled, column_config=stock_table_config(linked_df.columns),
                  hide_index=True, use_container_width=True, height=520)
     st.download_button("Download displayed table (CSV)",
-                       df.to_csv(index=False).encode("utf-8-sig"),
+                       linked_df.to_csv(index=False).encode("utf-8-sig"),
                        file_name=f"sgx_{key}.csv", mime="text/csv", key=f"download_{key}")
 
 
@@ -972,13 +1029,10 @@ def watchlist_page():
             view[f"Sector Median ({metric})"] = d[f"_median_{metric}"].values
             if name == "Profitability Standouts":
                 view["Net Profit Margin (%)"] = d["Net Profit Margin (%)"].values
-            st.dataframe(
-                style_stock_table(view), hide_index=True,
-                use_container_width=True,
-            )
+            linked_view = show_stock_table(view)
             st.download_button(
                 "Export flagged stocks (CSV)",
-                view.to_csv(index=False).encode("utf-8-sig"),
+                linked_view.to_csv(index=False).encode("utf-8-sig"),
                 file_name="sgx_" + name.lower().replace(" ", "_").replace("/", "_") + ".csv",
                 mime="text/csv",
                 key="attention_" + metric.replace("/", "_") + name[:4],
@@ -1011,6 +1065,9 @@ def company_search_page():
             selected = full_df.loc[chosen]
             sector = selected["Sector"]
             st.subheader(f"{selected['Company']} ({selected['SGX Code']})")
+            selected_link = add_sgx_links(full_df.loc[[chosen]])["SGX Link"].iloc[0]
+            if selected_link:
+                st.link_button("View this security on SGX ↗", selected_link)
             # Optional peer universe: sector peers by default, or the company's
             # market-cap tier. STI and Next 50 members share one pooled index
             # universe here (not two separate peer groups).
@@ -1210,10 +1267,7 @@ def market_explorer_page():
                     subset = valid.sort_values(column, ascending=ascending).head(10)
                     table = subset[["Company", "SGX Code", column]].reset_index(drop=True)
                     table.insert(0, "Rank", range(1, len(table) + 1))
-                    st.dataframe(
-                        style_stock_table(table), hide_index=True,
-                        use_container_width=True,
-                    )
+                    show_stock_table(table)
             st.divider()
 
         st.subheader("Full Stock Table")
@@ -1400,4 +1454,3 @@ with st.expander("Index data sources and classification methodology", expanded=F
 
 if date.today() >= date(2026, 12, 1):
     st.warning("Index membership snapshot may be outdated: December 2026 review is due. Update STI_CODES and NEXT50_CODES after verifying official changes.")
-
