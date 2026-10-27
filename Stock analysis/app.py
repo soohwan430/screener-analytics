@@ -776,7 +776,7 @@ def watchlist_page():
     st.subheader("Attention List Filters")
     st.caption(
         "Choose any combination of index and size groups. Multiple selections are "
-        "combined with OR; the market-cap cutoff is applied in addition."
+        "combined with OR; market-cap and P/B cutoffs are applied in addition."
     )
     group_options = [
         "STI", "iEdge Next 50", "Large Cap", "Mid Cap",
@@ -802,6 +802,23 @@ def watchlist_page():
             help="Only SGD-quoted securities are included when this cutoff is active.",
         )
 
+    enable_pb_floor = st.checkbox(
+        "Apply minimum Price-to-Book (P/B)",
+        key="attention_pb_floor_enabled",
+        help="Exclude stocks with P/B below your chosen minimum from every attention category.",
+    )
+    min_pb = None
+    if enable_pb_floor:
+        min_pb = st.number_input(
+            "Minimum P/B (x)",
+            min_value=0.0,
+            value=0.50,
+            step=0.10,
+            format="%.2f",
+            key="attention_min_pb",
+            help="A minimum of 0.50x keeps stocks with P/B >= 0.50x. Missing P/B values are excluded.",
+        )
+
     universe = full_df.copy()
     if selected_groups:
         group_mask = pd.Series(False, index=universe.index)
@@ -823,6 +840,10 @@ def watchlist_page():
             "Market-cap cutoff applies only to SGD-quoted securities because "
             "the SGX market-cap values have not been FX-converted."
         )
+
+    if min_pb is not None:
+        pb_values = pd.to_numeric(universe["P/B"], errors="coerce")
+        universe = universe.loc[pb_values.ge(min_pb)].copy()
 
     st.caption(f"Screening universe: {len(universe):,} of {len(full_df):,} SGX stocks.")
     momentum_metric = st.selectbox(
