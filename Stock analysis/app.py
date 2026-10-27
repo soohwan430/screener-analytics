@@ -1371,40 +1371,44 @@ def stock_filter_page():
         )
         st.divider()
 
+        # Compact three-across metric grid. Preserve existing widget keys.
+        available_metrics = []
         for col, label in filter_metrics:
             if col not in full_df.columns:
                 continue
             series = pd.to_numeric(full_df[col], errors="coerce")
             series = series.replace([float("inf"), float("-inf")], float("nan")).dropna()
-            if series.empty:
-                continue
-            low = float(series.min())
-            high = float(series.max())
-            enabled = st.checkbox(label, key=f"screen_on_{col}")
-            lower_col, upper_col = st.columns(2)
-            with lower_col:
-                lower_text = st.text_input(
-                    "Minimum", placeholder=f"{low:,.2f}",
-                    disabled=not enabled, key=f"screen_min_{col}",
-                    label_visibility="visible",
-                )
-            with upper_col:
-                upper_text = st.text_input(
-                    "Maximum", placeholder=f"{high:,.2f}",
-                    disabled=not enabled, key=f"screen_max_{col}",
-                    label_visibility="visible",
-                )
-            if enabled:
-                try:
-                    minimum = float(lower_text.replace(",", "")) if lower_text.strip() else None
-                    maximum = float(upper_text.replace(",", "")) if upper_text.strip() else None
-                    if minimum is not None and maximum is not None and minimum > maximum:
-                        st.warning(f"{label}: minimum exceeds maximum.")
-                    conditions.append((col, minimum, maximum))
-                except ValueError:
-                    st.warning(f"{label}: enter a valid number.")
-                    conditions.append((col, float("inf"), float("-inf")))
-            st.divider()
+            if not series.empty:
+                available_metrics.append((col, label, float(series.min()), float(series.max())))
+
+        for start in range(0, len(available_metrics), 3):
+            metric_columns = st.columns(3, gap="small")
+            for panel, (col, label, low, high) in zip(
+                metric_columns, available_metrics[start:start + 3]
+            ):
+                with panel:
+                    enabled = st.checkbox(label, key=f"screen_on_{col}")
+                    min_col, max_col = st.columns(2, gap="small")
+                    with min_col:
+                        lower_text = st.text_input(
+                            "Min", placeholder=f"{low:,.2f}",
+                            disabled=not enabled, key=f"screen_min_{col}",
+                        )
+                    with max_col:
+                        upper_text = st.text_input(
+                            "Max", placeholder=f"{high:,.2f}",
+                            disabled=not enabled, key=f"screen_max_{col}",
+                        )
+                    if enabled:
+                        try:
+                            minimum = float(lower_text.replace(",", "")) if lower_text.strip() else None
+                            maximum = float(upper_text.replace(",", "")) if upper_text.strip() else None
+                            if minimum is not None and maximum is not None and minimum > maximum:
+                                st.warning(f"{label}: minimum exceeds maximum.")
+                            conditions.append((col, minimum, maximum))
+                        except ValueError:
+                            st.warning(f"{label}: enter a valid number.")
+                            conditions.append((col, float("inf"), float("-inf")))
 
         if st.button("Clear all filters", key="screen_clear_filters"):
             for key in list(st.session_state):
