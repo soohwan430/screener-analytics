@@ -769,49 +769,134 @@ full_df["Sector"] = full_df["Sector"].fillna("Unclassified").replace(
 def watchlist_page():
     st.header("Research Attention List")
     st.caption(
-        "Automatically identifies up to 15 SGX stocks per signal using the latest "
-        "refreshed snapshot. No manual saving required. Signals are research leads, "
-        "not investment recommendations or confirmed changes since yesterday."
+        "Automatically identifies up to 30 SGX stocks per signal using the latest "
+        "refreshed snapshot. Research leads only, not investment recommendations."
     )
+
+    st.subheader("Attention List Filters")
+    st.caption(
+        "Choose any combination of index and size groups. Multiple selections are "
+        "combined with OR; the market-cap cutoff is applied in addition."
+    )
+    group_options = [
+        "STI", "iEdge Next 50", "Large Cap", "Mid Cap",
+        "Small Cap", "Micro Cap",
+    ]
+    selected_groups = st.multiselect(
+        "Size & Index (leave blank for all SGX stocks)",
+        options=group_options,
+        key="attention_groups",
+    )
+    enable_cap_cutoff = st.checkbox(
+        "Apply minimum market capitalization (S$ million)",
+        key="attention_cap_enabled",
+    )
+    min_cap = None
+    if enable_cap_cutoff:
+        min_cap = st.number_input(
+            "Minimum market cap (S$M)",
+            min_value=0.0,
+            value=300.0,
+            step=100.0,
+            key="attention_min_cap",
+            help="Only SGD-quoted securities are included when this cutoff is active.",
+        )
+
     universe = full_df.copy()
-    metric_columns = ["Revenue Growth (%)", "P/B", "P/E", "ROE (%)",
-                      "Net Profit Margin (%)", "Dividend Yield (%)",
-                      "13W Change (%)", "52W Change (%)", "Debt/Equity"]
+    if selected_groups:
+        group_mask = pd.Series(False, index=universe.index)
+        if "STI" in selected_groups:
+            group_mask |= universe["STI Member"].fillna(False)
+        if "iEdge Next 50" in selected_groups:
+            group_mask |= universe["Next 50 Member"].fillna(False)
+        tiers = [name for name in selected_groups if name.endswith("Cap")]
+        if tiers:
+            group_mask |= universe["Cap Tier"].isin(tiers)
+        universe = universe.loc[group_mask].copy()
+
+    if min_cap is not None:
+        market_caps = pd.to_numeric(universe["Market Cap (M)"], errors="coerce")
+        universe = universe.loc[
+            universe["Currency"].eq("SGD") & market_caps.ge(min_cap)
+        ].copy()
+        st.caption(
+            "Market-cap cutoff applies only to SGD-quoted securities because "
+            "the SGX market-cap values have not been FX-converted."
+        )
+
+    st.caption(f"Screening universe: {len(universe):,} of {len(full_df):,} SGX stocks.")
+    momentum_metric = st.selectbox(
+        "Price momentum period (Strong Price Momentum category)",
+        options=[
+            "4W Change (%)", "13W Change (%)",
+            "26W Change (%)", "52W Change (%)",
+        ],
+        index=1,
+        key="attention_momentum_period",
+        format_func=lambda x: {
+            "4W Change (%)": "4 weeks",
+            "13W Change (%)": "13 weeks",
+            "26W Change (%)": "26 weeks",
+            "52W Change (%)": "52 weeks",
+        }[x],
+    )
+
+    # Compute sector benchmarks from the full SGX universe so narrowing the
+    # attention-list filters does not silently change the comparison baseline.
+    metric_columns = [
+        "Revenue Growth (%)", "P/B", "P/E", "ROE (%)",
+        "Net Profit Margin (%)", "Dividend Yield (%)",
+        "4W Change (%)", "13W Change (%)", "26W Change (%)",
+        "52W Change (%)", "Debt/Equity",
+    ]
+    benchmark_source = full_df.copy()
     for col in metric_columns:
+        benchmark_source[col] = pd.to_numeric(
+            benchmark_source[col], errors="coerce"
+        )
         universe[col] = pd.to_numeric(universe[col], errors="coerce")
-
-    # Benchmark against the full sector; small sectors are not meaningful peers.
-    counts = universe.groupby("Sector")["SGX Code"].transform("count")
-    universe["_sector_n"] = counts
+    sector_sizes = benchmark_source.groupby("Sector")["SGX Code"].count()
+    universe["_sector_n"] = universe["Sector"].map(sector_sizes)
     for col in metric_columns:
-        universe[f"_median_{col}"] = universe.groupby("Sector")[col].transform("median")
+        sector_medians = benchmark_source.groupby("Sector")[col].median()
+        universe[f"_median_{col}"] = universe["Sector"].map(sector_medians)
 
+    momentum_thresholds = {
+        "4W Change (%)": 5.0,
+        "13W Change (%)": 10.0,
+        "26W Change (%)": 15.0,
+        "52W Change (%)": 20.0,
+    }
     categories = [
         ("Revenue Growth Standouts", "Revenue Growth (%)", "high",
-         "Revenue growth above 20% and the sector median; a high reported growth rate is not proof of a recent jump."),
+         "Revenue growth at least 20% and above the full-sector median."),
         ("Deep P/B Discounts", "P/B", "low",
-         "Positive P/B below 1.0x and below 75% of the sector median; may reflect fundamental risks."),
+         "Positive P/B below 1.0x and below 75% of the full-sector median."),
         ("Low P/E Relative to Peers", "P/E", "low",
-         "Positive P/E below 15x and below 75% of the sector median; negative earnings are excluded."),
+         "Positive P/E below 15x and below 75% of the full-sector median."),
         ("Profitability Standouts", "ROE (%)", "high",
-         "ROE above 15% and the sector median, with positive net profit margin."),
+         "ROE at least 15%, above the full-sector median, with positive net profit margin."),
         ("Dividend Yield Outliers", "Dividend Yield (%)", "high",
-         "Dividend yield above 5% and above the sector median; yield sustainability is not assessed."),
-        ("Strong Price Momentum", "13W Change (%)", "high",
-         "13-week price change above 10% and the sector median; not a forward return forecast."),
+         "Dividend yield at least 5% and above the full-sector median."),
+        ("Strong Price Momentum", momentum_metric, "high",
+         f"{momentum_metric} at least {momentum_thresholds[momentum_metric]:g}% "
+         "and above the full-sector median."),
         ("Leverage Watch", "Debt/Equity", "high",
-         "Debt/equity above 1.0x and above the sector median; financial-sector ratios may not be comparable."),
+         "Debt/equity at least 1.0x and above the full-sector median."),
     ]
-
-    st.info("Each list uses at least 5 sector constituents for peer comparisons. "
-            "Missing metrics are excluded. A stock can appear in multiple lists.")
+    st.info(
+        "Sector comparisons require at least 5 constituents in the full SGX "
+        "sector. Missing metrics are excluded. Stocks may appear in multiple lists."
+    )
     tabs = st.tabs([name for name, _, _, _ in categories])
     for tab, (name, metric, direction, explanation) in zip(tabs, categories):
         with tab:
             st.caption(explanation)
-            d = universe.loc[(universe["_sector_n"] >= 5) &
-                             universe[metric].notna() &
-                             universe[f"_median_{metric}"].notna()].copy()
+            d = universe.loc[
+                universe["_sector_n"].ge(5)
+                & universe[metric].notna()
+                & universe[f"_median_{metric}"].notna()
+            ].copy()
             med = d[f"_median_{metric}"]
             v = d[metric]
             if name == "Revenue Growth Standouts":
@@ -825,28 +910,36 @@ def watchlist_page():
             elif name == "Dividend Yield Outliers":
                 mask = (v >= 5) & (v > med)
             elif name == "Strong Price Momentum":
-                mask = (v >= 10) & (v > med)
+                mask = (v >= momentum_thresholds[momentum_metric]) & (v > med)
             else:
                 mask = (v >= 1) & (v > med)
-            d = d.loc[mask].sort_values(metric, ascending=(direction == "low")).head(15)
+            d = d.loc[mask].sort_values(
+                metric, ascending=(direction == "low")
+            ).head(30)
             st.metric("Stocks flagged", len(d))
             if d.empty:
-                st.info("No stocks meet this screen in the current SGX snapshot.")
+                st.info("No stocks meet this screen with the current filters.")
                 continue
-            view = d[["Company", "SGX Code", "Sector", metric]].copy()
+            view = d[["Company", "SGX Code", "Sector", "Market Cap (M)", metric]].copy()
             view[f"Sector Median ({metric})"] = d[f"_median_{metric}"].values
             if name == "Profitability Standouts":
                 view["Net Profit Margin (%)"] = d["Net Profit Margin (%)"].values
-            st.dataframe(style_stock_table(view), hide_index=True, use_container_width=True)
+            st.dataframe(
+                style_stock_table(view), hide_index=True,
+                use_container_width=True,
+            )
             st.download_button(
                 "Export flagged stocks (CSV)",
                 view.to_csv(index=False).encode("utf-8-sig"),
                 file_name="sgx_" + name.lower().replace(" ", "_").replace("/", "_") + ".csv",
-                mime="text/csv", key="attention_" + metric.replace("/", "_") + name[:4],
+                mime="text/csv",
+                key="attention_" + metric.replace("/", "_") + name[:4],
             )
-    st.caption("Source: current SGX stock screener snapshot. Sector medians are "
-               "cross-sectional and may mix different accounting/business models. "
-               "Refresh SGX Data to update the lists.")
+    st.caption(
+        "Source: current SGX stock screener snapshot. Market-cap tiers are "
+        "custom SGD classifications; index membership uses the existing snapshot. "
+        "Refresh SGX Data to update these lists."
+    )
 
 # ============================================================
 # INDEPENDENT NAVIGATION PAGES
