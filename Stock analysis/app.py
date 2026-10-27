@@ -764,6 +764,121 @@ full_df = add_memberships(st.session_state.sgx_data)
 full_df["Sector"] = full_df["Sector"].fillna("Unclassified").replace(
     {"Not Available": "Unclassified", "-": "Unclassified", "": "Unclassified"})
 
+# Watchlist is session-based. CSV export/import lets analysts restore it.
+if "watchlist_codes" not in st.session_state:
+    st.session_state.watchlist_codes = []
+
+def add_to_watchlist(code):
+    code = normalized_code(code)
+    if code and code not in st.session_state.watchlist_codes:
+        st.session_state.watchlist_codes.append(code)
+
+def remove_from_watchlist(code):
+    code = normalized_code(code)
+    st.session_state.watchlist_codes = [
+        x for x in st.session_state.watchlist_codes if x != code
+    ]
+
+def watchlist_page():
+    st.header("Research Watchlist")
+    st.caption(
+        "Save companies for research, compare their latest metrics and export your list. "
+        "The watchlist is stored for this browser session; export CSV to keep it."
+    )
+
+    available = full_df.copy()
+    available["_code"] = available["SGX Code"].map(normalized_code)
+    choices = available.drop_duplicates("_code").set_index("_code")
+    with st.form("watchlist_add_form"):
+        selected_codes = st.multiselect(
+            "Add SGX companies",
+            options=choices.index.tolist(),
+            format_func=lambda code: f"{choices.at[code, 'Company']} ({code})",
+        )
+        submitted = st.form_submit_button("Add to watchlist", type="primary")
+    if submitted:
+        for code in selected_codes:
+            add_to_watchlist(code)
+        if selected_codes:
+            st.success(f"Added {len(selected_codes)} selected stock(s).")
+
+    uploaded = st.file_uploader(
+        "Restore a previously exported watchlist (CSV)",
+        type=["csv"],
+        key="watchlist_import",
+    )
+    if uploaded is not None:
+        try:
+            imported = pd.read_csv(uploaded, dtype=str)
+            code_col = next(
+                (col for col in ("SGX Code", "Ticker", "Code") if col in imported.columns),
+                None,
+            )
+            if code_col is None:
+                st.warning("CSV must contain an 'SGX Code' column.")
+            elif st.button("Import codes from CSV", key="watchlist_import_confirm"):
+                count_before = len(st.session_state.watchlist_codes)
+                for code in imported[code_col].dropna():
+                    if normalized_code(code) in choices.index:
+                        add_to_watchlist(code)
+                st.success(
+                    f"Imported {len(st.session_state.watchlist_codes) - count_before} new stock(s)."
+                )
+        except Exception as exc:
+            st.error(f"Unable to read CSV: {exc}")
+
+    saved = st.session_state.watchlist_codes
+    st.metric("Tracked stocks", len(saved))
+    if not saved:
+        st.info("No stocks saved yet. Add a company above or from Company Search & Sector Peers.")
+        return
+
+    tracked = available.loc[available["_code"].isin(saved)].copy()
+    tracked["_order"] = tracked["_code"].map({code: i for i, code in enumerate(saved)})
+    tracked = tracked.sort_values("_order")
+    missing = [code for code in saved if code not in set(tracked["_code"])]
+    if missing:
+        st.warning("These saved codes are not in the latest SGX data: " + ", ".join(missing))
+
+    to_remove = st.multiselect(
+        "Remove stocks",
+        options=[code for code in saved if code in choices.index],
+        format_func=lambda code: f"{choices.at[code, 'Company']} ({code})",
+    )
+    if st.button("Remove selected", disabled=not to_remove):
+        for code in to_remove:
+            remove_from_watchlist(code)
+        st.rerun()
+
+    if tracked.empty:
+        return
+
+    st.subheader("Watchlist Financial Overview")
+    # Compare each stock with the median of its own sector, not the pooled
+    # median of unrelated watchlist companies.
+    metrics = ["P/E", "P/B", "ROE (%)", "Revenue Growth (%)",
+               "Net Profit Margin (%)", "Dividend Yield (%)", "Debt/Equity",
+               "13W Change (%)"]
+    benchmark = full_df.groupby("Sector")[metrics].median(numeric_only=True)
+    summary = tracked[["Company", "SGX Code", "Sector"] + metrics].copy()
+    for metric in ["P/E", "ROE (%)", "Revenue Growth (%)", "Dividend Yield (%)"]:
+        summary[f"{metric} Peer Median"] = tracked["Sector"].map(benchmark[metric]).values
+    st.dataframe(
+        style_stock_table(summary),
+        use_container_width=True,
+        hide_index=True,
+    )
+    st.caption(
+        "Peer medians are computed from each company's full SGX sector. "
+        "Lower valuation multiples are not necessarily better; investigate fundamentals and missing values."
+    )
+    st.download_button(
+        "Download watchlist CSV",
+        data=tracked.drop(columns=["_code", "_order"], errors="ignore").to_csv(index=False).encode("utf-8-sig"),
+        file_name="sgx_research_watchlist.csv",
+        mime="text/csv",
+    )
+
 # ============================================================
 # INDEPENDENT NAVIGATION PAGES
 # ============================================================
@@ -786,6 +901,17 @@ def company_search_page():
             selected = full_df.loc[chosen]
             sector = selected["Sector"]
             st.subheader(f"{selected['Company']} ({selected['SGX Code']})")
+            code = normalized_code(selected["SGX Code"])
+            if code in st.session_state.watchlist_codes:
+                st.success("This company is in your watchlist.")
+                if st.button("Remove from watchlist", key="search_watchlist_remove"):
+                    remove_from_watchlist(code)
+                    st.rerun()
+            else:
+                if st.button("＋ Add to watchlist", key="search_watchlist_add"):
+                    add_to_watchlist(code)
+                    st.rerun()
+
 
             # Optional peer universe: sector peers by default, or the company's
             # market-cap tier. STI and Next 50 members share one pooled index
@@ -925,14 +1051,12 @@ def market_explorer_page():
                 index=metric_options.index("P/E") if "P/E" in metric_options else 0,
                 key="overview_comparison_metric",
             )
-            selected_categories = st.multiselect(
-                "Categories to compare",
-                options=list(groups.keys()),
-                default=[name for name in ("STI", "iEdge Next 50", "Large Cap", "Mid Cap")
-                         if name in groups],
-                key="overview_comparison_categories",
-                help="Choose fewer categories to make each boxplot easier to read.",
-            )
+            # Always compare every available index, cap tier, and sector.
+            # No category multiselect: only the financial metric is user-selected.
+            # This also avoids stale Streamlit session-state selections hiding groups.
+            selected_categories = list(groups.keys())
+            st.caption(f"Showing all {len(selected_categories)} categories by default: "
+                       "indices, market-cap tiers, and every available sector.")
             comparison_scale = st.radio(
                 "Chart scale",
                 ["Focused (readable)", "Full range (all outliers)"],
@@ -1106,11 +1230,12 @@ def stock_filter_page():
 
 # Three research sections appear as horizontal tabs beneath the refresh button.
 # The shared SGX dataset stays in session state when switching tabs.
-search_tab, explorer_tab, filter_tab = st.tabs(
+search_tab, explorer_tab, filter_tab, watchlist_tab = st.tabs(
     [
         "🔎 Company Search & Sector Peers",
         "📊 Top & Bottom Overview",
         "🎛️ SGX Stock Filter",
+        "⭐ Research Watchlist",
     ]
 )
 
@@ -1122,6 +1247,9 @@ with explorer_tab:
 
 with filter_tab:
     stock_filter_page()
+
+with watchlist_tab:
+    watchlist_page()
 
 # Reference notes remain available below the research tabs.
 if len(STI_CODES) != 30 or len(NEXT50_CODES) != 50:
