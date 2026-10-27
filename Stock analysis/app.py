@@ -764,120 +764,89 @@ full_df = add_memberships(st.session_state.sgx_data)
 full_df["Sector"] = full_df["Sector"].fillna("Unclassified").replace(
     {"Not Available": "Unclassified", "-": "Unclassified", "": "Unclassified"})
 
-# Watchlist is session-based. CSV export/import lets analysts restore it.
-if "watchlist_codes" not in st.session_state:
-    st.session_state.watchlist_codes = []
+# Automatic research-attention lists: latest SGX cross-sectional data only.
+# These are screening signals, not recommendations or verified event alerts.
+def watchlist_page():
+    st.header("Research Attention List")
+    st.caption(
+        "Automatically identifies up to 15 SGX stocks per signal using the latest "
+        "refreshed snapshot. No manual saving required. Signals are research leads, "
+        "not investment recommendations or confirmed changes since yesterday."
+    )
+    universe = full_df.copy()
+    metric_columns = ["Revenue Growth (%)", "P/B", "P/E", "ROE (%)",
+                      "Net Profit Margin (%)", "Dividend Yield (%)",
+                      "13W Change (%)", "52W Change (%)", "Debt/Equity"]
+    for col in metric_columns:
+        universe[col] = pd.to_numeric(universe[col], errors="coerce")
 
-def add_to_watchlist(code):
-    code = normalized_code(code)
-    if code and code not in st.session_state.watchlist_codes:
-        st.session_state.watchlist_codes.append(code)
+    # Benchmark against the full sector; small sectors are not meaningful peers.
+    counts = universe.groupby("Sector")["SGX Code"].transform("count")
+    universe["_sector_n"] = counts
+    for col in metric_columns:
+        universe[f"_median_{col}"] = universe.groupby("Sector")[col].transform("median")
 
-def remove_from_watchlist(code):
-    code = normalized_code(code)
-    st.session_state.watchlist_codes = [
-        x for x in st.session_state.watchlist_codes if x != code
+    categories = [
+        ("Revenue Growth Standouts", "Revenue Growth (%)", "high",
+         "Revenue growth above 20% and the sector median; a high reported growth rate is not proof of a recent jump."),
+        ("Deep P/B Discounts", "P/B", "low",
+         "Positive P/B below 1.0x and below 75% of the sector median; may reflect fundamental risks."),
+        ("Low P/E Relative to Peers", "P/E", "low",
+         "Positive P/E below 15x and below 75% of the sector median; negative earnings are excluded."),
+        ("Profitability Standouts", "ROE (%)", "high",
+         "ROE above 15% and the sector median, with positive net profit margin."),
+        ("Dividend Yield Outliers", "Dividend Yield (%)", "high",
+         "Dividend yield above 5% and above the sector median; yield sustainability is not assessed."),
+        ("Strong Price Momentum", "13W Change (%)", "high",
+         "13-week price change above 10% and the sector median; not a forward return forecast."),
+        ("Leverage Watch", "Debt/Equity", "high",
+         "Debt/equity above 1.0x and above the sector median; financial-sector ratios may not be comparable."),
     ]
 
-def watchlist_page():
-    st.header("Research Watchlist")
-    st.caption(
-        "Save companies for research, compare their latest metrics and export your list. "
-        "The watchlist is stored for this browser session; export CSV to keep it."
-    )
-
-    available = full_df.copy()
-    available["_code"] = available["SGX Code"].map(normalized_code)
-    choices = available.drop_duplicates("_code").set_index("_code")
-    with st.form("watchlist_add_form"):
-        selected_codes = st.multiselect(
-            "Add SGX companies",
-            options=choices.index.tolist(),
-            format_func=lambda code: f"{choices.at[code, 'Company']} ({code})",
-        )
-        submitted = st.form_submit_button("Add to watchlist", type="primary")
-    if submitted:
-        for code in selected_codes:
-            add_to_watchlist(code)
-        if selected_codes:
-            st.success(f"Added {len(selected_codes)} selected stock(s).")
-
-    uploaded = st.file_uploader(
-        "Restore a previously exported watchlist (CSV)",
-        type=["csv"],
-        key="watchlist_import",
-    )
-    if uploaded is not None:
-        try:
-            imported = pd.read_csv(uploaded, dtype=str)
-            code_col = next(
-                (col for col in ("SGX Code", "Ticker", "Code") if col in imported.columns),
-                None,
+    st.info("Each list uses at least 5 sector constituents for peer comparisons. "
+            "Missing metrics are excluded. A stock can appear in multiple lists.")
+    tabs = st.tabs([name for name, _, _, _ in categories])
+    for tab, (name, metric, direction, explanation) in zip(tabs, categories):
+        with tab:
+            st.caption(explanation)
+            d = universe.loc[(universe["_sector_n"] >= 5) &
+                             universe[metric].notna() &
+                             universe[f"_median_{metric}"].notna()].copy()
+            med = d[f"_median_{metric}"]
+            v = d[metric]
+            if name == "Revenue Growth Standouts":
+                mask = (v >= 20) & (v > med)
+            elif name == "Deep P/B Discounts":
+                mask = (v > 0) & (v < 1) & (med > 0) & (v < med * .75)
+            elif name == "Low P/E Relative to Peers":
+                mask = (v > 0) & (v < 15) & (med > 0) & (v < med * .75)
+            elif name == "Profitability Standouts":
+                mask = (v >= 15) & (v > med) & (d["Net Profit Margin (%)"] > 0)
+            elif name == "Dividend Yield Outliers":
+                mask = (v >= 5) & (v > med)
+            elif name == "Strong Price Momentum":
+                mask = (v >= 10) & (v > med)
+            else:
+                mask = (v >= 1) & (v > med)
+            d = d.loc[mask].sort_values(metric, ascending=(direction == "low")).head(15)
+            st.metric("Stocks flagged", len(d))
+            if d.empty:
+                st.info("No stocks meet this screen in the current SGX snapshot.")
+                continue
+            view = d[["Company", "SGX Code", "Sector", metric]].copy()
+            view[f"Sector Median ({metric})"] = d[f"_median_{metric}"].values
+            if name == "Profitability Standouts":
+                view["Net Profit Margin (%)"] = d["Net Profit Margin (%)"].values
+            st.dataframe(style_stock_table(view), hide_index=True, use_container_width=True)
+            st.download_button(
+                "Export flagged stocks (CSV)",
+                view.to_csv(index=False).encode("utf-8-sig"),
+                file_name="sgx_" + name.lower().replace(" ", "_").replace("/", "_") + ".csv",
+                mime="text/csv", key="attention_" + metric.replace("/", "_") + name[:4],
             )
-            if code_col is None:
-                st.warning("CSV must contain an 'SGX Code' column.")
-            elif st.button("Import codes from CSV", key="watchlist_import_confirm"):
-                count_before = len(st.session_state.watchlist_codes)
-                for code in imported[code_col].dropna():
-                    if normalized_code(code) in choices.index:
-                        add_to_watchlist(code)
-                st.success(
-                    f"Imported {len(st.session_state.watchlist_codes) - count_before} new stock(s)."
-                )
-        except Exception as exc:
-            st.error(f"Unable to read CSV: {exc}")
-
-    saved = st.session_state.watchlist_codes
-    st.metric("Tracked stocks", len(saved))
-    if not saved:
-        st.info("No stocks saved yet. Add a company above or from Company Search & Sector Peers.")
-        return
-
-    tracked = available.loc[available["_code"].isin(saved)].copy()
-    tracked["_order"] = tracked["_code"].map({code: i for i, code in enumerate(saved)})
-    tracked = tracked.sort_values("_order")
-    missing = [code for code in saved if code not in set(tracked["_code"])]
-    if missing:
-        st.warning("These saved codes are not in the latest SGX data: " + ", ".join(missing))
-
-    to_remove = st.multiselect(
-        "Remove stocks",
-        options=[code for code in saved if code in choices.index],
-        format_func=lambda code: f"{choices.at[code, 'Company']} ({code})",
-    )
-    if st.button("Remove selected", disabled=not to_remove):
-        for code in to_remove:
-            remove_from_watchlist(code)
-        st.rerun()
-
-    if tracked.empty:
-        return
-
-    st.subheader("Watchlist Financial Overview")
-    # Compare each stock with the median of its own sector, not the pooled
-    # median of unrelated watchlist companies.
-    metrics = ["P/E", "P/B", "ROE (%)", "Revenue Growth (%)",
-               "Net Profit Margin (%)", "Dividend Yield (%)", "Debt/Equity",
-               "13W Change (%)"]
-    benchmark = full_df.groupby("Sector")[metrics].median(numeric_only=True)
-    summary = tracked[["Company", "SGX Code", "Sector"] + metrics].copy()
-    for metric in ["P/E", "ROE (%)", "Revenue Growth (%)", "Dividend Yield (%)"]:
-        summary[f"{metric} Peer Median"] = tracked["Sector"].map(benchmark[metric]).values
-    st.dataframe(
-        style_stock_table(summary),
-        use_container_width=True,
-        hide_index=True,
-    )
-    st.caption(
-        "Peer medians are computed from each company's full SGX sector. "
-        "Lower valuation multiples are not necessarily better; investigate fundamentals and missing values."
-    )
-    st.download_button(
-        "Download watchlist CSV",
-        data=tracked.drop(columns=["_code", "_order"], errors="ignore").to_csv(index=False).encode("utf-8-sig"),
-        file_name="sgx_research_watchlist.csv",
-        mime="text/csv",
-    )
+    st.caption("Source: current SGX stock screener snapshot. Sector medians are "
+               "cross-sectional and may mix different accounting/business models. "
+               "Refresh SGX Data to update the lists.")
 
 # ============================================================
 # INDEPENDENT NAVIGATION PAGES
@@ -901,18 +870,6 @@ def company_search_page():
             selected = full_df.loc[chosen]
             sector = selected["Sector"]
             st.subheader(f"{selected['Company']} ({selected['SGX Code']})")
-            code = normalized_code(selected["SGX Code"])
-            if code in st.session_state.watchlist_codes:
-                st.success("This company is in your watchlist.")
-                if st.button("Remove from watchlist", key="search_watchlist_remove"):
-                    remove_from_watchlist(code)
-                    st.rerun()
-            else:
-                if st.button("＋ Add to watchlist", key="search_watchlist_add"):
-                    add_to_watchlist(code)
-                    st.rerun()
-
-
             # Optional peer universe: sector peers by default, or the company's
             # market-cap tier. STI and Next 50 members share one pooled index
             # universe here (not two separate peer groups).
@@ -1235,7 +1192,7 @@ search_tab, explorer_tab, filter_tab, watchlist_tab = st.tabs(
         "🔎 Company Search & Sector Peers",
         "📊 Top & Bottom Overview",
         "🎛️ SGX Stock Filter",
-        "⭐ Research Watchlist",
+        "🚩 Research Attention List",
     ]
 )
 
