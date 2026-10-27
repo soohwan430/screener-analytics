@@ -3,3 +3,4 @@ pandas
 numpy
 playwright
 jinja2
+plotly
