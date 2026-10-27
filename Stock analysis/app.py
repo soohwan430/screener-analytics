@@ -9,6 +9,7 @@ from datetime import date
 from html import escape
 
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 from playwright.async_api import async_playwright
 
@@ -518,6 +519,95 @@ def summary_table(df):
     return result.round(2)
 
 
+
+def boxplot_dashboard(df, key_prefix="stats"):
+    """Compact vertical boxplots for every available financial metric."""
+    metrics = numeric_metrics(df)
+    if df.empty or not metrics:
+        st.info("No numeric observations available for boxplots.")
+        return
+
+    st.caption(
+        "Each plot has its own vertical scale. The box covers the 25th–75th "
+        "percentiles, with the median inside; whiskers use the 1.5×IQR rule. "
+        "Hover over plotted observations for company details."
+    )
+    for start in range(0, len(metrics), 4):
+        cols = st.columns(4, gap="small")
+        for offset, metric in enumerate(metrics[start:start + 4]):
+            with cols[offset]:
+                values = pd.to_numeric(df[metric], errors="coerce").replace(
+                    [float("inf"), float("-inf")], float("nan")
+                )
+                valid = values.notna()
+                subset = df.loc[valid]
+                numbers = values.loc[valid]
+                st.markdown(
+                    f"<div style='text-align:center;font-size:12px;font-weight:600;"
+                    f"margin:0 0 -8px 0'>{escape(metric)}</div>",
+                    unsafe_allow_html=True,
+                )
+                if numbers.empty:
+                    st.caption("No data")
+                    continue
+                fig = go.Figure()
+                fig.add_trace(go.Box(
+                    y=numbers.tolist(),
+                    name=metric,
+                    boxpoints="outliers",
+                    marker=dict(color="#E45752", size=4),
+                    line=dict(color="#168A83", width=1.5),
+                    fillcolor="rgba(22,138,131,0.20)",
+                    customdata=subset[["Company", "SGX Code"]].astype(str).values,
+                    hovertemplate=(
+                        "%{customdata[0]} (%{customdata[1]})<br>"
+                        + escape(metric) + ": %{y:,.2f}<extra></extra>"
+                    ),
+                    showlegend=False,
+                ))
+                fig.update_layout(
+                    height=151,
+                    margin=dict(l=4, r=4, t=8, b=3),
+                    xaxis=dict(showticklabels=False, showgrid=False, zeroline=False),
+                    yaxis=dict(tickfont=dict(size=9), nticks=4, zeroline=False,
+                               gridcolor="rgba(128,128,128,0.12)"),
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    font=dict(size=10),
+                )
+                st.plotly_chart(
+                    fig, use_container_width=True,
+                    config={"displayModeBar": False, "responsive": True},
+                    key=f"{key_prefix}_box_{start + offset}",
+                )
+
+
+def category_comparison_plot(groups, metric):
+    """One selected metric across categories, replacing the summary table."""
+    fig = go.Figure()
+    for name, group_df in groups.items():
+        values = pd.to_numeric(group_df[metric], errors="coerce").replace(
+            [float("inf"), float("-inf")], float("nan")
+        )
+        valid = values.notna()
+        if not valid.any():
+            continue
+        fig.add_trace(go.Box(
+            y=values.loc[valid].tolist(), name=name, boxpoints="outliers",
+            customdata=group_df.loc[valid, ["Company", "SGX Code"]].astype(str).values,
+            hovertemplate=("%{customdata[0]} (%{customdata[1]})<br>"
+                           + escape(metric) + ": %{y:,.2f}<extra></extra>"),
+            showlegend=False,
+        ))
+    fig.update_layout(
+        height=390, margin=dict(l=15, r=10, t=10, b=115),
+        xaxis=dict(tickangle=-45, tickfont=dict(size=10)),
+        yaxis_title=metric, boxmode="group",
+    )
+    st.plotly_chart(fig, use_container_width=True,
+                    config={"displayModeBar": False}, key="cross_category_box")
+
+
 def peer_table(df, selected_code=None, key="peer"):
     """Show peers and emphasize the selected stock using Pandas Styler."""
     if df.empty:
@@ -607,8 +697,8 @@ def company_search_page():
             st.subheader(f"{selected['Company']} ({selected['SGX Code']})")
             st.caption(f"Sector: {sector} · {len(peers)} companies · Selected stock highlighted in bold")
             peer_table(peers, selected["SGX Code"], "search_peers")
-            with st.expander("Peer group statistics"):
-                st.dataframe(summary_table(peers), hide_index=True, use_container_width=True)
+            st.subheader("Peer Group Distributions")
+            boxplot_dashboard(peers, key_prefix="company_peers")
 
 
 
@@ -676,8 +766,8 @@ def market_explorer_page():
     if data.empty:
         st.info("No SGX stocks match this combination. Uncheck one or more options.")
     else:
-        st.subheader("Category Statistics")
-        st.dataframe(summary_table(data), hide_index=True, use_container_width=True)
+        st.subheader("Category Distributions")
+        boxplot_dashboard(data, key_prefix="overview")
 
         st.subheader("Top & Bottom Rankings")
         show_sector_rankings(data, key_prefix="overview_combined")
@@ -704,24 +794,7 @@ def market_explorer_page():
                 index=metric_options.index("P/E") if "P/E" in metric_options else 0,
                 key="overview_comparison_metric",
             )
-            rows = []
-            for name, group_df in groups.items():
-                v = pd.to_numeric(group_df[metric], errors="coerce").replace(
-                    [float("inf"), float("-inf")], float("nan")
-                ).dropna()
-                rows.append({
-                    "Category": name, "Stocks": len(group_df), "Valid N": len(v),
-                    "Mean": v.mean(), "Median": v.median(),
-                    "25th Percentile": v.quantile(.25),
-                    "75th Percentile": v.quantile(.75),
-                })
-            stats = pd.DataFrame(rows).round(2)
-            st.dataframe(stats, hide_index=True, use_container_width=True)
-            st.download_button(
-                "Download comparison CSV", stats.to_csv(index=False).encode("utf-8-sig"),
-                file_name="sgx_category_statistics.csv", mime="text/csv",
-                key="overview_stats_download",
-            )
+            category_comparison_plot(groups, metric)
 
 
 
@@ -855,8 +928,8 @@ def stock_filter_page():
         st.info("No stocks match these filters. Widen the ranges or clear some filters.")
     else:
         peer_table(filtered, key="advanced_filter")
-        with st.expander("Statistics for filtered stocks"):
-            st.dataframe(summary_table(filtered), hide_index=True, use_container_width=True)
+        st.subheader("Filtered Stock Distributions")
+        boxplot_dashboard(filtered, key_prefix="filtered")
 
 
 # Three research sections appear as horizontal tabs beneath the refresh button.
