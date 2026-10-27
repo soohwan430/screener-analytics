@@ -562,6 +562,7 @@ def boxplot_dashboard(df, key_prefix="stats", selected_code=None):
                     st.caption("No data")
                     continue
                 fig = go.Figure()
+                median_value = float(numbers.median())
                 fig.add_trace(go.Box(
                     y=numbers.tolist(), x=["Peers"] * len(numbers),
                     name="Peers", boxpoints="outliers",
@@ -573,6 +574,18 @@ def boxplot_dashboard(df, key_prefix="stats", selected_code=None):
                         "%{customdata[0]} (%{customdata[1]})<br>"
                         + escape(metric) + ": %{y:,.2f}<extra></extra>"
                     ), showlegend=False,
+                ))
+                # Large median marker and a clearly readable numeric label.
+                fig.add_trace(go.Scatter(
+                    x=["Peers"], y=[median_value], mode="markers+text",
+                    name="Median",
+                    marker=dict(symbol="circle", size=19, color="#172A6A",
+                                line=dict(color="white", width=2)),
+                    text=[f"Median: {median_value:,.2f}"],
+                    textposition="middle right",
+                    textfont=dict(size=15, color="#172A6A"),
+                    hovertemplate=f"Median: {median_value:,.2f}<extra></extra>",
+                    showlegend=False, cliponaxis=False,
                 ))
                 selected_value = None
                 if selected_row is not None:
@@ -615,7 +628,7 @@ def boxplot_dashboard(df, key_prefix="stats", selected_code=None):
                     axis["range"] = [lower - pad, upper + pad]
                 fig.update_layout(
                     height=300,
-                    margin=dict(l=22, r=12, t=18, b=12),
+                    margin=dict(l=22, r=125, t=18, b=12),
                     xaxis=dict(showticklabels=False, showgrid=False, zeroline=False),
                     yaxis=axis,
                     paper_bgcolor="rgba(0,0,0,0)",
@@ -658,6 +671,18 @@ def category_comparison_plot(groups, metric, scale="Focused (readable)"):
                            + escape(metric) + ": %{y:,.2f}<extra></extra>"),
             showlegend=False,
         ))
+        median_value = float(numbers.median())
+        fig.add_trace(go.Scatter(
+            x=[name], y=[median_value], mode="markers+text",
+            marker=dict(symbol="circle", size=18, color="#172A6A",
+                        line=dict(color="white", width=2)),
+            text=[f"{median_value:,.2f}"],
+            textposition="top center",
+            textfont=dict(size=14, color="#172A6A"),
+            name=f"{name} median", showlegend=False,
+            hovertemplate=f"{escape(name)} median: {median_value:,.2f}<extra></extra>",
+            cliponaxis=False,
+        ))
     if not plotted:
         st.info("No valid observations for the selected categories and metric.")
         return
@@ -669,6 +694,8 @@ def category_comparison_plot(groups, metric, scale="Focused (readable)"):
         # This changes the VIEW only; all observations remain in the boxplot calculations.
         endpoints = []
         for trace in fig.data:
+            if trace.type != "box":
+                continue
             series = pd.Series(trace.y, dtype=float)
             q1, q3 = series.quantile([.25, .75])
             iqr = q3 - q1
@@ -1148,7 +1175,46 @@ def market_explorer_page():
             boxplot_dashboard(data, key_prefix="overview")
 
         st.subheader("Top & Bottom Rankings")
-        show_sector_rankings(data, key_prefix="overview_combined")
+        momentum_choice = st.selectbox(
+            "Price Momentum ranking period",
+            ["4W Change (%)", "13W Change (%)",
+             "26W Change (%)", "52W Change (%)"],
+            format_func=lambda x: x.replace(" Change (%)", ""),
+            key="overview_momentum_ranking_period",
+        )
+        ranking_specs = [
+            ("Valuation - P/E", "P/E", True),
+            ("Valuation - P/B", "P/B", True),
+            ("Profitability - ROE", "ROE (%)", True),
+            ("Revenue Growth", "Revenue Growth (%)", True),
+            ("Dividend Yield", "Dividend Yield (%)", True),
+            ("Net Profit Margin", "Net Profit Margin (%)", True),
+            (f"Price Momentum - {momentum_choice.split(' ')[0]}", momentum_choice, True),
+        ]
+        for heading, column, higher_is_top in ranking_specs:
+            if column not in data.columns:
+                continue
+            values = pd.to_numeric(data[column], errors="coerce")
+            valid = data.loc[values.notna()].copy()
+            valid[column] = values.loc[values.notna()]
+            if valid.empty:
+                continue
+            st.markdown(f"**{heading}**")
+            left, right = st.columns(2)
+            for panel, ascending, label in [
+                (left, not higher_is_top, "Top 10"),
+                (right, higher_is_top, "Bottom 10"),
+            ]:
+                with panel:
+                    st.caption(label)
+                    subset = valid.sort_values(column, ascending=ascending).head(10)
+                    table = subset[["Company", "SGX Code", column]].reset_index(drop=True)
+                    table.insert(0, "Rank", range(1, len(table) + 1))
+                    st.dataframe(
+                        style_stock_table(table), hide_index=True,
+                        use_container_width=True,
+                    )
+            st.divider()
 
         st.subheader("Full Stock Table")
         filter_text = st.text_input("Search within selected stocks by company or ticker", key="overview_search")
