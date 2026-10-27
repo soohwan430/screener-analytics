@@ -631,9 +631,11 @@ def boxplot_dashboard(df, key_prefix="stats", selected_code=None):
                 )
 
 
-def category_comparison_plot(groups, metric):
-    """One selected metric across categories, replacing the summary table."""
+def category_comparison_plot(groups, metric, scale="Focused (readable)"):
+    """Compare true stock-level category distributions with vertical boxplots."""
     fig = go.Figure()
+    all_values = []
+    plotted = 0
     for name, group_df in groups.items():
         values = pd.to_numeric(group_df[metric], errors="coerce").replace(
             [float("inf"), float("-inf")], float("nan")
@@ -641,22 +643,61 @@ def category_comparison_plot(groups, metric):
         valid = values.notna()
         if not valid.any():
             continue
+        numbers = values.loc[valid]
+        all_values.extend(numbers.tolist())
+        plotted += 1
         fig.add_trace(go.Box(
-            y=values.loc[valid].tolist(), name=name, boxpoints="outliers",
+            y=numbers.tolist(), name=name,
+            boxpoints="outliers",
+            quartilemethod="linear",
+            marker=dict(color="#E45752", size=5),
+            line=dict(color="#168A83", width=2),
+            fillcolor="rgba(22,138,131,0.28)",
             customdata=group_df.loc[valid, ["Company", "SGX Code"]].astype(str).values,
             hovertemplate=("%{customdata[0]} (%{customdata[1]})<br>"
                            + escape(metric) + ": %{y:,.2f}<extra></extra>"),
             showlegend=False,
         ))
+    if not plotted:
+        st.info("No valid observations for the selected categories and metric.")
+        return
+
+    yaxis = dict(tickfont=dict(size=16), title_font=dict(size=17),
+                 gridcolor="rgba(128,128,128,0.15)", automargin=True)
+    if scale.startswith("Focused") and len(all_values) >= 4:
+        # Pool category whisker endpoints for a readable shared axis.
+        # This changes the VIEW only; all observations remain in the boxplot calculations.
+        endpoints = []
+        for trace in fig.data:
+            series = pd.Series(trace.y, dtype=float)
+            q1, q3 = series.quantile([.25, .75])
+            iqr = q3 - q1
+            if iqr > 0:
+                within = series[(series >= q1 - 1.5 * iqr) &
+                                (series <= q3 + 1.5 * iqr)]
+                if not within.empty:
+                    endpoints.extend([float(within.min()), float(within.max())])
+            else:
+                endpoints.extend([float(q1), float(q3)])
+        if endpoints:
+            lower, upper = min(endpoints), max(endpoints)
+            if lower == upper:
+                pad = max(abs(lower) * .1, 1)
+            else:
+                pad = (upper - lower) * .08
+            yaxis["range"] = [lower - pad, upper + pad]
+
     fig.update_layout(
-        height=430, margin=dict(l=30, r=12, t=18, b=125),
+        height=480, margin=dict(l=45, r=12, t=25, b=135),
         font=dict(size=16), hoverlabel=dict(font_size=15),
-        xaxis=dict(tickangle=-45, tickfont=dict(size=15)),
-        yaxis=dict(tickfont=dict(size=16), title_font=dict(size=17)),
-        yaxis_title=metric, boxmode="group",
+        xaxis=dict(tickangle=-40, tickfont=dict(size=15), automargin=True),
+        yaxis=yaxis, yaxis_title=metric, boxmode="group",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
     )
     st.plotly_chart(fig, use_container_width=True,
-                    config={"displayModeBar": False}, key="cross_category_box")
+                    config={"displayModeBar": False, "responsive": True},
+                    key="cross_category_box")
 
 
 def peer_table(df, selected_code=None, key="peer"):
@@ -884,13 +925,32 @@ def market_explorer_page():
                 index=metric_options.index("P/E") if "P/E" in metric_options else 0,
                 key="overview_comparison_metric",
             )
-            category_comparison_plot(groups, metric)
+            selected_categories = st.multiselect(
+                "Categories to compare",
+                options=list(groups.keys()),
+                default=[name for name in ("STI", "iEdge Next 50", "Large Cap", "Mid Cap")
+                         if name in groups],
+                key="overview_comparison_categories",
+                help="Choose fewer categories to make each boxplot easier to read.",
+            )
+            comparison_scale = st.radio(
+                "Chart scale",
+                ["Focused (readable)", "Full range (all outliers)"],
+                horizontal=True, key="overview_comparison_scale",
+            )
+            st.caption("Each category uses its own stock-level observations. "
+                       "Focused view hides distant outliers visually, not statistically. "
+                       "Categories may overlap.")
+            category_comparison_plot(
+                {name: groups[name] for name in selected_categories},
+                metric, comparison_scale,
+            )
 
     if data.empty:
         st.info("No SGX stocks match this combination. Uncheck one or more options.")
     else:
-        st.subheader("Category Distributions")
-        boxplot_dashboard(data, key_prefix="overview")
+        with st.expander("Category Distributions", expanded=False):
+            boxplot_dashboard(data, key_prefix="overview")
 
         st.subheader("Top & Bottom Rankings")
         show_sector_rankings(data, key_prefix="overview_combined")
@@ -1040,8 +1100,8 @@ def stock_filter_page():
         st.info("No stocks match these filters. Widen the ranges or clear some filters.")
     else:
         peer_table(filtered, key="advanced_filter")
-        st.subheader("Filtered Stock Distributions")
-        boxplot_dashboard(filtered, key_prefix="filtered")
+        with st.expander("Filtered Stock Distributions", expanded=False):
+            boxplot_dashboard(filtered, key_prefix="filtered")
 
 
 # Three research sections appear as horizontal tabs beneath the refresh button.
