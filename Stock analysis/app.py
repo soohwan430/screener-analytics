@@ -554,8 +554,8 @@ def boxplot_dashboard(df, key_prefix="stats", selected_code=None):
                 subset = df.loc[valid]
                 numbers = values.loc[valid]
                 st.markdown(
-                    f"<div style='text-align:center;font-size:13px;font-weight:650;"
-                    f"margin:0 0 -5px 0'>{escape(metric)}</div>",
+                    f"<div style='text-align:center;font-size:20px;font-weight:750;"
+                    f"margin:8px 0 2px 0'>{escape(metric)}</div>",
                     unsafe_allow_html=True,
                 )
                 if numbers.empty:
@@ -593,7 +593,7 @@ def boxplot_dashboard(df, key_prefix="stats", selected_code=None):
                     else:
                         st.caption("Selected company: N/A")
 
-                axis = dict(tickfont=dict(size=10), nticks=5, zeroline=False,
+                axis = dict(tickfont=dict(size=16), nticks=5, zeroline=False,
                             gridcolor="rgba(128,128,128,0.15)", automargin=True)
                 if view.startswith("Focused") and len(numbers) >= 4:
                     q1, q3 = numbers.quantile([.25, .75])
@@ -614,13 +614,14 @@ def boxplot_dashboard(df, key_prefix="stats", selected_code=None):
                     pad = (upper - lower) * .08
                     axis["range"] = [lower - pad, upper + pad]
                 fig.update_layout(
-                    height=245,
-                    margin=dict(l=8, r=8, t=12, b=8),
+                    height=300,
+                    margin=dict(l=22, r=12, t=18, b=12),
                     xaxis=dict(showticklabels=False, showgrid=False, zeroline=False),
                     yaxis=axis,
                     paper_bgcolor="rgba(0,0,0,0)",
                     plot_bgcolor="rgba(0,0,0,0)",
-                    font=dict(size=11),
+                    font=dict(size=16),
+                    hoverlabel=dict(font_size=15),
                     hovermode="closest",
                 )
                 st.plotly_chart(
@@ -648,8 +649,10 @@ def category_comparison_plot(groups, metric):
             showlegend=False,
         ))
     fig.update_layout(
-        height=390, margin=dict(l=15, r=10, t=10, b=115),
-        xaxis=dict(tickangle=-45, tickfont=dict(size=10)),
+        height=430, margin=dict(l=30, r=12, t=18, b=125),
+        font=dict(size=16), hoverlabel=dict(font_size=15),
+        xaxis=dict(tickangle=-45, tickfont=dict(size=15)),
+        yaxis=dict(tickfont=dict(size=16), title_font=dict(size=17)),
         yaxis_title=metric, boxmode="group",
     )
     st.plotly_chart(fig, use_container_width=True,
