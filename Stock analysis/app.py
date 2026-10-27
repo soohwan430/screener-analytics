@@ -868,7 +868,7 @@ def watchlist_page():
     st.subheader("Attention List Filters")
     st.caption(
         "Choose any combination of index and size groups. Multiple selections are "
-        "combined with OR; market-cap and P/B cutoffs are applied in addition."
+        "combined with OR; market-cap, P/B, and P/E cutoffs are applied in addition."
     )
     group_options = [
         "STI", "iEdge Next 50", "Large Cap", "Mid Cap",
@@ -911,6 +911,23 @@ def watchlist_page():
             help="A minimum of 0.50x keeps stocks with P/B >= 0.50x. Missing P/B values are excluded.",
         )
 
+    enable_pe_floor = st.checkbox(
+        "Apply minimum Price-to-Earnings (P/E)",
+        key="attention_pe_floor_enabled",
+        help="Exclude stocks with P/E below your chosen minimum from every attention category.",
+    )
+    min_pe = None
+    if enable_pe_floor:
+        min_pe = st.number_input(
+            "Minimum P/E (x)",
+            min_value=0.0,
+            value=5.0,
+            step=0.5,
+            format="%.2f",
+            key="attention_min_pe",
+            help="Only stocks with a reported P/E at or above this threshold are retained. Missing P/E values are excluded.",
+        )
+
     universe = full_df.copy()
     if selected_groups:
         group_mask = pd.Series(False, index=universe.index)
@@ -936,6 +953,10 @@ def watchlist_page():
     if min_pb is not None:
         pb_values = pd.to_numeric(universe["P/B"], errors="coerce")
         universe = universe.loc[pb_values.ge(min_pb)].copy()
+
+    if min_pe is not None:
+        pe_values = pd.to_numeric(universe["P/E"], errors="coerce")
+        universe = universe.loc[pe_values.ge(min_pe)].copy()
 
     st.caption(f"Screening universe: {len(universe):,} of {len(full_df):,} SGX stocks.")
     momentum_metric = st.selectbox(
@@ -1240,13 +1261,6 @@ def market_explorer_page():
             boxplot_dashboard(data, key_prefix="overview")
 
         st.subheader("Top & Bottom Rankings")
-        momentum_choice = st.selectbox(
-            "Price Momentum ranking period",
-            ["4W Change (%)", "13W Change (%)",
-             "26W Change (%)", "52W Change (%)"],
-            format_func=lambda x: x.replace(" Change (%)", ""),
-            key="overview_momentum_ranking_period",
-        )
         ranking_specs = [
             ("Valuation - P/E", "P/E", True),
             ("Valuation - P/B", "P/B", True),
@@ -1254,9 +1268,19 @@ def market_explorer_page():
             ("Revenue Growth", "Revenue Growth (%)", True),
             ("Dividend Yield", "Dividend Yield (%)", True),
             ("Net Profit Margin", "Net Profit Margin (%)", True),
-            (f"Price Momentum - {momentum_choice.split(' ')[0]}", momentum_choice, True),
+            ("Price Momentum", None, True),
         ]
         for heading, column, higher_is_top in ranking_specs:
+            if heading == "Price Momentum":
+                st.markdown("**Price Momentum**")
+                column = st.selectbox(
+                    "Price Momentum ranking period",
+                    ["4W Change (%)", "13W Change (%)",
+                     "26W Change (%)", "52W Change (%)"],
+                    format_func=lambda x: x.replace(" Change (%)", ""),
+                    key="overview_momentum_ranking_period",
+                )
+                heading = f"Price Momentum - {column.split(' ')[0]}"
             if column not in data.columns:
                 continue
             values = pd.to_numeric(data[column], errors="coerce")
@@ -1264,7 +1288,8 @@ def market_explorer_page():
             valid[column] = values.loc[values.notna()]
             if valid.empty:
                 continue
-            st.markdown(f"**{heading}**")
+            if not heading.startswith("Price Momentum - "):
+                st.markdown(f"**{heading}**")
             left, right = st.columns(2)
             for panel, ascending, label in [
                 (left, not higher_is_top, "Top 10"),
