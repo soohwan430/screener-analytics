@@ -7,8 +7,24 @@ from playwright.async_api import async_playwright
 from sector_rankings import show_sector_rankings
 from table_styles import style_stock_table
 
+import subprocess
+import sys
+from pathlib import Path
+
+@st.cache_resource(show_spinner="Installing Chromium browser...")
+def ensure_chromium():
+    subprocess.run(
+        [sys.executable, "-m", "playwright", "install", "chromium"],
+        check=True,
+        timeout=180,
+    )
+    return True
+
+
 SGX_URL = "https://investors.sgx.com/market/stock-screener?from=/market/securities"
 st.set_page_config(page_title="SGX Equity Screener", page_icon="📈", layout="wide")
+
+
 
 def require_password():
     if st.session_state.get("authenticated", False):
