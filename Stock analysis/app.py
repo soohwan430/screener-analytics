@@ -744,12 +744,72 @@ def company_search_page():
                 format_func=lambda i: f"{full_df.at[i, 'Company']} ({full_df.at[i, 'SGX Code']})")
             selected = full_df.loc[chosen]
             sector = selected["Sector"]
-            peers = full_df[full_df["Sector"] == sector].copy()
             st.subheader(f"{selected['Company']} ({selected['SGX Code']})")
-            st.caption(f"Sector: {sector} · {len(peers)} companies · Selected stock highlighted in bold")
+
+            # Optional peer universe: sector peers by default, or the company's
+            # market-cap tier. STI and Next 50 members share one pooled index
+            # universe here (not two separate peer groups).
+            use_size_peers = st.checkbox(
+                "Compare within the same size / index group",
+                value=False,
+                key="search_same_size_group",
+                help=(
+                    "For STI or iEdge Next 50 members, compare against the combined "
+                    "STI + Next 50 universe. For other companies, compare against "
+                    "the same market-cap tier. Index membership is based on "
+                    "September 2026 snapshots."
+                ),
+            )
+            if use_size_peers:
+                is_index_member = bool(selected["STI Member"]) or bool(selected["Next 50 Member"])
+                if is_index_member:
+                    peer_mask = (full_df["STI Member"].fillna(False)
+                                 | full_df["Next 50 Member"].fillna(False))
+                    peer_description = "Combined STI + iEdge Next 50"
+                else:
+                    cap_tier = str(selected["Cap Tier"])
+                    if cap_tier == "Unclassified":
+                        st.warning(
+                            "This stock has no assigned SGD market-cap tier. "
+                            "Showing its sector peers instead."
+                        )
+                        peer_mask = full_df["Sector"].eq(sector)
+                        peer_description = f"Sector: {sector} (size unavailable)"
+                    else:
+                        peer_mask = full_df["Cap Tier"].eq(cap_tier)
+                        peer_description = f"Size group: {cap_tier}"
+
+                # Analysts may narrow the size/index universe to the same
+                # industry, without losing the ability to compare across sectors.
+                same_sector_only = st.checkbox(
+                    "Also restrict to the same sector",
+                    value=False,
+                    key="search_size_same_sector",
+                )
+                if same_sector_only:
+                    peer_mask &= full_df["Sector"].eq(sector)
+                    peer_description += f" · Sector: {sector}"
+                peers = full_df.loc[peer_mask].copy()
+            else:
+                peers = full_df[full_df["Sector"] == sector].copy()
+                peer_description = f"Sector: {sector}"
+
+            # Always include the searched company if its classification is
+            # missing or if it is not found in the chosen peer universe.
+            if chosen not in peers.index:
+                peers = pd.concat([full_df.loc[[chosen]], peers]).loc[
+                    lambda frame: ~frame.index.duplicated(keep="first")
+                ]
+            st.caption(
+                f"{peer_description} · {len(peers)} companies · "
+                "Selected stock highlighted in bold"
+            )
             peer_table(peers, selected["SGX Code"], "search_peers")
-            st.subheader("Peer Group Distributions")
-            boxplot_dashboard(peers, key_prefix="company_peers", selected_code=selected["SGX Code"])
+            with st.expander("Peer Group Distributions", expanded=False):
+                boxplot_dashboard(
+                    peers, key_prefix="company_peers",
+                    selected_code=selected["SGX Code"],
+                )
 
 
 
@@ -814,6 +874,18 @@ def market_explorer_page():
         active.append("Sectors: " + ", ".join(selected_sectors))
     st.caption(" | ".join(active) if active else "All SGX stocks selected")
 
+    with st.expander("Cross-category statistical comparison", expanded=False):
+        st.caption("Compare individual categories across the full SGX universe. Index, cap and sector groups can overlap.")
+        groups = category_data(full_df)
+        metric_options = numeric_metrics(full_df)
+        if metric_options:
+            metric = st.selectbox(
+                "Choose financial metric", metric_options,
+                index=metric_options.index("P/E") if "P/E" in metric_options else 0,
+                key="overview_comparison_metric",
+            )
+            category_comparison_plot(groups, metric)
+
     if data.empty:
         st.info("No SGX stocks match this combination. Uncheck one or more options.")
     else:
@@ -835,17 +907,6 @@ def market_explorer_page():
         st.write(f"Showing **{len(visible):,}** records")
         peer_table(visible, key="overview_combined")
 
-    with st.expander("Cross-category statistical comparison", expanded=False):
-        st.caption("Compare individual categories across the full SGX universe. Index, cap and sector groups can overlap.")
-        groups = category_data(full_df)
-        metric_options = numeric_metrics(full_df)
-        if metric_options:
-            metric = st.selectbox(
-                "Choose financial metric", metric_options,
-                index=metric_options.index("P/E") if "P/E" in metric_options else 0,
-                key="overview_comparison_metric",
-            )
-            category_comparison_plot(groups, metric)
 
 
 
