@@ -582,18 +582,6 @@ full_df = add_memberships(st.session_state.sgx_data)
 full_df["Sector"] = full_df["Sector"].fillna("Unclassified").replace(
     {"Not Available": "Unclassified", "-": "Unclassified", "": "Unclassified"})
 
-if len(STI_CODES) != 30 or len(NEXT50_CODES) != 50:
-    st.error("Index membership snapshot has an unexpected number of tickers.")
-
-with st.expander("Index data sources and classification methodology", expanded=False):
-    st.write(f"Index constituent snapshots effective **{INDEX_AS_OF:%d %B %Y}**. Next scheduled reviews: **{NEXT_REVIEW_MONTH}**. Membership does not update automatically.")
-    st.markdown(f"[FTSE Russell STI source]({STI_SOURCE}) · [SGX Next 50 September review]({NEXT50_SOURCE})")
-    st.write("Custom SGD-denominated market-cap tiers: Large ≥ S$10bn; Mid S$1bn–<S$10bn; Small S$300m–<S$1bn; Micro <S$300m. Non-SGD stocks remain unclassified; these are not official index definitions.")
-    st.write("Index tabs contain matched stocks from the SGX screener, which may be fewer than the official constituent counts. Financial statistics exclude missing values on a per-metric basis.")
-
-if date.today() >= date(2026, 12, 1):
-    st.warning("Index membership snapshot may be outdated: December 2026 review is due. Update STI_CODES and NEXT50_CODES after verifying official changes.")
-
 # ============================================================
 # INDEPENDENT NAVIGATION PAGES
 # ============================================================
@@ -625,72 +613,115 @@ def company_search_page():
 
 
 def market_explorer_page():
-    st.header("SGX Sector & Market Explorer")
-    st.caption("Browse by market size/index or by industry. Index membership uses September 2026 snapshots.")
-    groups = category_data(full_df)
-    size_names = ["All SGX", "STI", "iEdge Next 50", "Large Cap", "Mid Cap", "Small Cap", "Micro Cap"]
-    industry_names = [name for name in groups if name.startswith("Sector: ")]
+    st.header("Top & Bottom Overview")
+    st.caption(
+        "Select any combination of size/index groups and sectors. "
+        "Selections within a group are combined using OR; "
+        "size/index and sector selections are combined using AND. "
+        "Index membership uses September 2026 snapshots."
+    )
 
-    by_size_tab, by_industry_tab = st.tabs(["By Size & Index", "By Industry"])
+    size_names = ["STI", "iEdge Next 50", "Large Cap", "Mid Cap", "Small Cap", "Micro Cap"]
+    sectors = sorted(full_df["Sector"].dropna().astype(str).unique().tolist())
 
-    for section, tab, names in (
-        ("size", by_size_tab, size_names),
-        ("industry", by_industry_tab, industry_names),
-    ):
-        with tab:
-            choices = [name for name in names if name in groups]
-            if not choices:
-                st.info("No categories available.")
-                continue
-            selected_name = st.selectbox(
-                "Choose a market category" if section == "size" else "Choose an industry sector",
-                choices,
-                format_func=lambda name: f"{name.removeprefix('Sector: ')} ({len(groups[name]):,})",
-                key=f"explorer_select_{section}",
+    with st.container(border=True):
+        st.subheader("Choose your universe")
+        st.caption("Leave a group unchecked to include all stocks from that group.")
+        st.markdown("**Size & Index**")
+        size_cols = st.columns(3)
+        selected_sizes = []
+        for i, name in enumerate(size_names):
+            with size_cols[i % 3]:
+                if st.checkbox(name, key=f"overview_size_{i}"):
+                    selected_sizes.append(name)
+
+        st.divider()
+        st.markdown("**Industry Sector**")
+        sector_cols = st.columns(3)
+        selected_sectors = []
+        for i, name in enumerate(sectors):
+            with sector_cols[i % 3]:
+                if st.checkbox(name, key=f"overview_sector_{i}"):
+                    selected_sectors.append(name)
+
+        if st.button("Clear selections", key="overview_clear"):
+            for key in list(st.session_state):
+                if key.startswith("overview_size_") or key.startswith("overview_sector_"):
+                    del st.session_state[key]
+            st.rerun()
+
+    data = full_df.copy()
+    if selected_sizes:
+        size_mask = pd.Series(False, index=data.index)
+        if "STI" in selected_sizes:
+            size_mask |= data["STI Member"].fillna(False)
+        if "iEdge Next 50" in selected_sizes:
+            size_mask |= data["Next 50 Member"].fillna(False)
+        cap_tiers = [name for name in selected_sizes if name in
+                     {"Large Cap", "Mid Cap", "Small Cap", "Micro Cap"}]
+        if cap_tiers:
+            size_mask |= data["Cap Tier"].isin(cap_tiers)
+        data = data.loc[size_mask]
+    if selected_sectors:
+        data = data.loc[data["Sector"].isin(selected_sectors)]
+
+    st.metric("Stocks in selected universe", f"{len(data):,}")
+    active = []
+    if selected_sizes:
+        active.append("Size/Index: " + ", ".join(selected_sizes))
+    if selected_sectors:
+        active.append("Sectors: " + ", ".join(selected_sectors))
+    st.caption(" | ".join(active) if active else "All SGX stocks selected")
+
+    if data.empty:
+        st.info("No SGX stocks match this combination. Uncheck one or more options.")
+    else:
+        st.subheader("Category Statistics")
+        st.dataframe(summary_table(data), hide_index=True, use_container_width=True)
+
+        st.subheader("Top & Bottom Rankings")
+        show_sector_rankings(data, key_prefix="overview_combined")
+
+        st.subheader("Full Stock Table")
+        filter_text = st.text_input("Search within selected stocks by company or ticker", key="overview_search")
+        visible = data
+        if filter_text.strip():
+            term = filter_text.strip()
+            visible = data.loc[
+                data["Company"].astype(str).str.contains(term, case=False, na=False, regex=False)
+                | data["SGX Code"].astype(str).str.contains(term, case=False, na=False, regex=False)
+            ]
+        st.write(f"Showing **{len(visible):,}** records")
+        peer_table(visible, key="overview_combined")
+
+    with st.expander("Cross-category statistical comparison", expanded=False):
+        st.caption("Compare individual categories across the full SGX universe. Index, cap and sector groups can overlap.")
+        groups = category_data(full_df)
+        metric_options = numeric_metrics(full_df)
+        if metric_options:
+            metric = st.selectbox(
+                "Choose financial metric", metric_options,
+                index=metric_options.index("P/E") if "P/E" in metric_options else 0,
+                key="overview_comparison_metric",
             )
-            data = groups[selected_name]
-            st.subheader(selected_name.removeprefix("Sector: "))
-            st.metric("SGX records", f"{len(data):,}")
-            if selected_name in ("STI", "iEdge Next 50"):
-                expected = 30 if selected_name == "STI" else 50
-                if len(data) != expected:
-                    st.warning(
-                        f"Matched {len(data)} of {expected} snapshot tickers in the SGX screener. "
-                        "Unmatched stocks are excluded from statistics."
-                    )
-            if data.empty:
-                st.info("No records in this category.")
-                continue
-            st.subheader("Category Statistics")
-            st.dataframe(summary_table(data), hide_index=True, use_container_width=True)
-            show_sector_rankings(data, key_prefix=f"category_{section}")
-            st.subheader("Full Stock Table")
-            filter_text = st.text_input("Filter company or ticker", key=f"filter_{section}")
-            visible = data
-            if filter_text:
-                visible = data[
-                    data["Company"].astype(str).str.contains(filter_text, case=False, na=False, regex=False)
-                    | data["SGX Code"].astype(str).str.contains(filter_text, case=False, na=False, regex=False)
-                ]
-            st.write(f"Showing **{len(visible):,}** records")
-            peer_table(visible, key=f"category_{section}")
-
-    st.header("Cross-Category Statistical Comparison")
-    st.caption("Each row is a sector or market category. Index membership overlaps with sector and cap-tier groups. Counts are based on available SGX screener records.")
-    metric_options = numeric_metrics(full_df)
-    if metric_options:
-        metric = st.selectbox("Choose financial metric", metric_options, index=metric_options.index("P/E") if "P/E" in metric_options else 0)
-        rows = []
-        for name, data in groups.items():
-            v = pd.to_numeric(data[metric], errors="coerce").replace([float("inf"), float("-inf")], float("nan")).dropna()
-            rows.append({"Category": name, "Stocks": len(data), "Valid N": len(v),
-                         "Mean": v.mean(), "Median": v.median(),
-                         "25th Percentile": v.quantile(.25), "75th Percentile": v.quantile(.75)})
-        stats = pd.DataFrame(rows).round(2)
-        st.dataframe(stats, hide_index=True, use_container_width=True)
-        st.download_button("Download comparison CSV", stats.to_csv(index=False).encode("utf-8-sig"),
-                           file_name="sgx_category_statistics.csv", mime="text/csv")
-
+            rows = []
+            for name, group_df in groups.items():
+                v = pd.to_numeric(group_df[metric], errors="coerce").replace(
+                    [float("inf"), float("-inf")], float("nan")
+                ).dropna()
+                rows.append({
+                    "Category": name, "Stocks": len(group_df), "Valid N": len(v),
+                    "Mean": v.mean(), "Median": v.median(),
+                    "25th Percentile": v.quantile(.25),
+                    "75th Percentile": v.quantile(.75),
+                })
+            stats = pd.DataFrame(rows).round(2)
+            st.dataframe(stats, hide_index=True, use_container_width=True)
+            st.download_button(
+                "Download comparison CSV", stats.to_csv(index=False).encode("utf-8-sig"),
+                file_name="sgx_category_statistics.csv", mime="text/csv",
+                key="overview_stats_download",
+            )
 
 
 
@@ -719,13 +750,25 @@ def stock_filter_page():
         ("Revenue Growth (%)", "Revenue Growth (%)"),
     ]
 
-    panel, results_panel = st.columns([1, 3], gap="large")
     conditions = []
     selected_sectors = []
     sector_enabled = False
+    group_enabled = False
+    selected_groups = []
 
-    with panel:
-        st.subheader("Filter by")
+    with st.expander("Filter by", expanded=True):
+        group_enabled = st.checkbox("Size & Index", key="screen_group_enabled")
+        group_options = ["STI", "iEdge Next 50", "Large Cap", "Mid Cap", "Small Cap", "Micro Cap"]
+        selected_groups = st.multiselect(
+            "Choose index or market-cap groups",
+            group_options,
+            disabled=not group_enabled,
+            placeholder="All stocks" if not group_enabled else "Select groups",
+            key="screen_groups",
+        )
+        st.caption("Multiple selected groups are combined using OR. Index membership uses the September 2026 snapshot; cap tiers use custom SGD market-cap thresholds.")
+        st.divider()
+
         sector_enabled = st.checkbox("Sector", key="screen_sector_enabled")
         sectors = sorted(full_df["Sector"].dropna().astype(str).unique().tolist())
         selected_sectors = st.multiselect(
@@ -776,46 +819,75 @@ def stock_filter_page():
                     del st.session_state[key]
             st.rerun()
 
-    with results_panel:
-        filtered = full_df.copy()
-        if sector_enabled and selected_sectors:
-            filtered = filtered[filtered["Sector"].isin(selected_sectors)]
-        for col, minimum, maximum in conditions:
+    st.divider()
+    filtered = full_df.copy()
+    if group_enabled and selected_groups:
+        group_mask = pd.Series(False, index=filtered.index)
+        if "STI" in selected_groups:
+            group_mask |= filtered["STI Member"].fillna(False)
+        if "iEdge Next 50" in selected_groups:
+            group_mask |= filtered["Next 50 Member"].fillna(False)
+        selected_tiers = [g for g in selected_groups if g in {"Large Cap", "Mid Cap", "Small Cap", "Micro Cap"}]
+        if selected_tiers:
+            group_mask |= filtered["Cap Tier"].isin(selected_tiers)
+        filtered = filtered.loc[group_mask]
+    if sector_enabled and selected_sectors:
+        filtered = filtered[filtered["Sector"].isin(selected_sectors)]
+    for col, minimum, maximum in conditions:
+        values = pd.to_numeric(filtered[col], errors="coerce")
+        if minimum is not None:
+            filtered = filtered.loc[values >= minimum]
             values = pd.to_numeric(filtered[col], errors="coerce")
-            if minimum is not None:
-                filtered = filtered.loc[values >= minimum]
-                values = pd.to_numeric(filtered[col], errors="coerce")
-            if maximum is not None:
-                filtered = filtered.loc[values <= maximum]
+        if maximum is not None:
+            filtered = filtered.loc[values <= maximum]
 
-        st.subheader("Filtered SGX Stocks")
-        st.metric("Matching stocks", f"{len(filtered):,}")
-        st.caption(f"{len(filtered):,} of {len(full_df):,} SGX stocks match your active filters.")
-        search_text = st.text_input("Search results by company or ticker", key="screen_results_search")
-        if search_text.strip():
-            term = search_text.strip()
-            filtered = filtered[
-                filtered["Company"].astype(str).str.contains(term, case=False, regex=False, na=False)
-                | filtered["SGX Code"].astype(str).str.contains(term, case=False, regex=False, na=False)
-            ]
-        if filtered.empty:
-            st.info("No stocks match these filters. Widen the ranges or clear some filters.")
-        else:
-            peer_table(filtered, key="advanced_filter")
-            with st.expander("Statistics for filtered stocks"):
-                st.dataframe(summary_table(filtered), hide_index=True, use_container_width=True)
-
-
-# Shared SGX data is stored in session state and reused across pages.
-# The browser fetch happens only when Refresh SGX Data is clicked.
-pg = st.navigation(
-    {
-        "Research Tools": [
-            st.Page(company_search_page, title="Company Search & Sector Peers", icon="🔎", default=True),
-            st.Page(market_explorer_page, title="SGX Sector & Market Explorer", icon="📊"),
-            st.Page(stock_filter_page, title="SGX Stock Filter", icon="🎛️"),
+    st.subheader("Filtered SGX Stocks")
+    st.metric("Matching stocks", f"{len(filtered):,}")
+    st.caption(f"{len(filtered):,} of {len(full_df):,} SGX stocks match your active filters.")
+    search_text = st.text_input("Search results by company or ticker", key="screen_results_search")
+    if search_text.strip():
+        term = search_text.strip()
+        filtered = filtered[
+            filtered["Company"].astype(str).str.contains(term, case=False, regex=False, na=False)
+            | filtered["SGX Code"].astype(str).str.contains(term, case=False, regex=False, na=False)
         ]
-    },
-    position="sidebar",
+    if filtered.empty:
+        st.info("No stocks match these filters. Widen the ranges or clear some filters.")
+    else:
+        peer_table(filtered, key="advanced_filter")
+        with st.expander("Statistics for filtered stocks"):
+            st.dataframe(summary_table(filtered), hide_index=True, use_container_width=True)
+
+
+# Three research sections appear as horizontal tabs beneath the refresh button.
+# The shared SGX dataset stays in session state when switching tabs.
+search_tab, explorer_tab, filter_tab = st.tabs(
+    [
+        "🔎 Company Search & Sector Peers",
+        "📊 Top & Bottom Overview",
+        "🎛️ SGX Stock Filter",
+    ]
 )
-pg.run()
+
+with search_tab:
+    company_search_page()
+
+with explorer_tab:
+    market_explorer_page()
+
+with filter_tab:
+    stock_filter_page()
+
+# Reference notes remain available below the research tabs.
+if len(STI_CODES) != 30 or len(NEXT50_CODES) != 50:
+    st.error("Index membership snapshot has an unexpected number of tickers.")
+
+with st.expander("Index data sources and classification methodology", expanded=False):
+    st.write(f"Index constituent snapshots effective **{INDEX_AS_OF:%d %B %Y}**. Next scheduled reviews: **{NEXT_REVIEW_MONTH}**. Membership does not update automatically.")
+    st.markdown(f"[FTSE Russell STI source]({STI_SOURCE}) · [SGX Next 50 September review]({NEXT50_SOURCE})")
+    st.write("Custom SGD-denominated market-cap tiers: Large ≥ S$10bn; Mid S$1bn–<S$10bn; Small S$300m–<S$1bn; Micro <S$300m. Non-SGD stocks remain unclassified; these are not official index definitions.")
+    st.write("Index tabs contain matched stocks from the SGX screener, which may be fewer than the official constituent counts. Financial statistics exclude missing values on a per-metric basis.")
+
+if date.today() >= date(2026, 12, 1):
+    st.warning("Index membership snapshot may be outdated: December 2026 review is due. Update STI_CODES and NEXT50_CODES after verifying official changes.")
+
