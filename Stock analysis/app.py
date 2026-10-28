@@ -1088,7 +1088,6 @@ FINANCIAL_ENDPOINTS = {
     "Income Statement": "financialstatementreports/v2.0/incomeStatement",
     "Balance Sheet": "financialstatementreports/v2.0/balanceSheet",
     "Cash Flow": "financialstatementreports/v2.0/cashFlow",
-    "Financial Ratios": "ratiosreports/v2.0",
 }
 
 FINANCIAL_FIELDS = {
@@ -1120,21 +1119,13 @@ FINANCIAL_FIELDS = {
         "cashFromFinancingAct": "Financing cash flow",
         "netChangeInCash": "Net change in cash",
     },
-    "Financial Ratios": {
-        "peRatio": "P/E", "priceBookValue": "P/B",
-        "priceSales": "Price/Sales", "dividendYield": "Dividend yield",
-        "returnOnAssets": "Return on assets", "netProfitMargin": "Net profit margin",
-        "assetTurnover": "Asset turnover", "longTermDebtEquity": "Long-term debt/equity",
-        "beta": "Beta", "totalMarketCap": "Market cap",
-        "totalRevenue": "Revenue", "netIncome": "Net income",
-        "normalizedDilutedEPS": "Normalized diluted EPS",
-    },
+
 }
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_company_financials(ticker):
-    """Request four SGX endpoints for one selected stock; cache for one hour."""
+    """Request three SGX statement endpoints for one selected stock; cache for one hour."""
     code = normalized_code(ticker)
     if not code.isalnum() or len(code) > 12:
         raise ValueError("Invalid SGX stock code")
@@ -1232,57 +1223,6 @@ def financial_history_frame(records, fields=None):
     return pd.DataFrame(rows, columns=["Metric", *years])
 
 
-def growth_history_frame(records):
-    """Compute YoY growth from reported income-statement values."""
-    if not records:
-        return pd.DataFrame()
-    data = pd.DataFrame(records)
-    if "periodEndDate" not in data:
-        return pd.DataFrame()
-    data["Year"] = pd.to_datetime(data["periodEndDate"], errors="coerce").dt.year
-    data = data.dropna(subset=["Year"]).sort_values("Year").drop_duplicates("Year")
-    years = [str(int(y)) for y in data["Year"].tolist()]
-    rows = []
-    for field, label in [("totalRevenue", "Revenue growth YoY (%)"),
-                         ("netIncome", "Net income growth YoY (%)"),
-                         ("dilutedNormalizedEPS", "Normalized diluted EPS growth YoY (%)")]:
-        if field not in data:
-            continue
-        values = pd.to_numeric(data[field], errors="coerce")
-        previous = values.shift(1)
-        growth = ((values / previous) - 1) * 100
-        growth = growth.where(previous > 0)
-        row = {"Metric": label}
-        for year, value in zip(data["Year"], growth):
-            row[str(int(year))] = round(float(value), 2) if pd.notna(value) else None
-        rows.append({"Metric": label, **{year: row.get(year) for year in years}})
-    return pd.DataFrame(rows)
-
-
-def financial_ratios_frame(records):
-    if not records:
-        return pd.DataFrame()
-    record = records[0]
-    percent_fields = {"dividendYield", "returnOnAssets", "netProfitMargin", "longTermDebtEquity"}
-    money_fields = {"totalMarketCap", "totalRevenue", "netIncome"}
-    rows = []
-    for field, raw in record.items():
-        if field in {"currencyId", "lastUpdatedTime"}:
-            continue
-        label = humanize_financial_field(field)
-        value = pd.to_numeric(raw, errors="coerce")
-        if pd.isna(value):
-            rows.append({"Metric": label, "Value": "—"})
-            continue
-        unit = " (%)" if field in percent_fields else " (M)" if field in money_fields else ""
-        if field in percent_fields:
-            value *= 100
-        if field in money_fields:
-            value /= 1_000_000
-        rows.append({"Metric": label + unit, "Value": f"{float(value):,.3f}"})
-    return pd.DataFrame(rows)
-
-
 def show_company_financials(ticker):
     st.subheader("Historical Financial Statements")
     st.caption("SGX structured financial data · All reported statement line items · Oldest year first · Monetary figures in millions (reporting currency varies by company) · Source: SGX/Morningstar")
@@ -1295,16 +1235,9 @@ def show_company_financials(ticker):
     with st.spinner(f"Loading SGX financial data for {code}..."):
         results, errors = fetch_company_financials(code)
     # Independent collapsible sections, all closed by default.
-    for label in ["Income Statement", "Balance Sheet", "Cash Flow", "Financial Ratios", "Growth Rates"]:
+    for label in ["Income Statement", "Balance Sheet", "Cash Flow"]:
         with st.expander(label, expanded=False):
-            if label == "Growth Rates":
-                frame = growth_history_frame(results.get("Income Statement", []))
-                st.caption("Year-over-year changes; unavailable for the earliest year or non-positive base values.")
-            elif label == "Financial Ratios":
-                frame = financial_ratios_frame(results.get(label, []))
-                st.caption("Latest available snapshot; ratios are not a five-year history. Missing values are shown as —.")
-            else:
-                frame = financial_history_frame(results.get(label, []), FINANCIAL_FIELDS[label])
+            frame = financial_history_frame(results.get(label, []), FINANCIAL_FIELDS[label])
             if frame.empty:
                 st.warning(f"No {label.lower()} data available for {code} from this API.")
                 if label in errors:
