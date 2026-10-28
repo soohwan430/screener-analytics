@@ -3,6 +3,9 @@
 
 import asyncio
 import hmac
+import json
+import urllib.error
+import urllib.request
 import subprocess
 import sys
 from datetime import date
@@ -1077,6 +1080,198 @@ def watchlist_page():
 # ============================================================
 
 
+# ============================================================
+# COMPANY FINANCIAL STATEMENTS — SGX STRUCTURED API
+# ============================================================
+
+FINANCIAL_ENDPOINTS = {
+    "Income Statement": "financialstatementreports/v2.0/incomeStatement",
+    "Balance Sheet": "financialstatementreports/v2.0/balanceSheet",
+    "Cash Flow": "financialstatementreports/v2.0/cashFlow",
+    "Financial Ratios": "ratiosreports/v2.0",
+}
+
+FINANCIAL_FIELDS = {
+    "Income Statement": {
+        "totalRevenue": "Revenue", "netIncomeBeforeTaxes": "Income before tax",
+        "provisionForIncomeTaxes": "Income tax expense",
+        "netIncomeAfterTaxes": "Income after tax", "netIncome": "Net income",
+        "dilutedNetIncome": "Diluted net income",
+        "dilutedAvgShares": "Diluted average shares",
+        "dilutedNormalizedEPS": "Normalized diluted EPS",
+    },
+    "Balance Sheet": {
+        "cashAndShortTermInvestments": "Cash & short-term investments",
+        "netAccountsReceivable": "Accounts receivable",
+        "totalAssets": "Total assets", "totalDebt": "Total debt",
+        "totalLongTermDebt": "Long-term debt",
+        "totalLiabilities": "Total liabilities",
+        "retainedEarnings": "Retained earnings",
+        "totalEquity": "Total equity",
+        "tangibleBookValuePerShare": "Tangible book value/share",
+    },
+    "Cash Flow": {
+        "netIncome": "Net income (cash-flow basis)",
+        "depreciation": "Depreciation",
+        "cashFromOperatingAct": "Operating cash flow",
+        "capitalExpenditure": "Capital expenditure",
+        "cashFromInvestingAct": "Investing cash flow",
+        "totalCashDividends": "Dividends paid",
+        "cashFromFinancingAct": "Financing cash flow",
+        "netChangeInCash": "Net change in cash",
+    },
+    "Financial Ratios": {
+        "peRatio": "P/E", "priceBookValue": "P/B",
+        "priceSales": "Price/Sales", "dividendYield": "Dividend yield",
+        "returnOnAssets": "Return on assets", "netProfitMargin": "Net profit margin",
+        "assetTurnover": "Asset turnover", "longTermDebtEquity": "Long-term debt/equity",
+        "beta": "Beta", "totalMarketCap": "Market cap",
+        "totalRevenue": "Revenue", "netIncome": "Net income",
+        "normalizedDilutedEPS": "Normalized diluted EPS",
+    },
+}
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_company_financials(ticker):
+    """Request four SGX endpoints for one selected stock; cache for one hour."""
+    code = normalized_code(ticker)
+    if not code.isalnum() or len(code) > 12:
+        raise ValueError("Invalid SGX stock code")
+    result = {}
+    errors = {}
+    for label, path in FINANCIAL_ENDPOINTS.items():
+        url = (f"https://api.sgx.com/{path}/countryCode/SGP/"
+               f"stockCode/{code}?params=all")
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (compatible; SGXResearchScreener/1.0)",
+            "Accept": "application/json",
+            "Referer": "https://investors.sgx.com/",
+        })
+        try:
+            with urllib.request.urlopen(req, timeout=18) as response:
+                payload = json.load(response)
+            if str(payload.get("meta", {}).get("code", "200")) != "200":
+                raise ValueError("SGX returned an unsuccessful API response")
+            data = payload.get("data", [])
+            result[label] = data if isinstance(data, list) else ([data] if isinstance(data, dict) else [])
+        except (urllib.error.URLError, TimeoutError, ValueError, OSError, json.JSONDecodeError) as exc:
+            result[label] = []
+            errors[label] = str(exc)
+    return result, errors
+
+
+def financial_history_frame(records, fields):
+    """Build a metric-by-year financial statement, in SGD millions."""
+    if not records:
+        return pd.DataFrame()
+    data = pd.DataFrame(records)
+    if "periodEndDate" not in data.columns:
+        return pd.DataFrame()
+    data["Year"] = pd.to_datetime(data["periodEndDate"], errors="coerce").dt.strftime("%Y")
+    data = data.dropna(subset=["Year"]).drop_duplicates(subset=["Year"])
+    if data.empty:
+        return pd.DataFrame()
+    years = sorted(data["Year"].tolist(), reverse=True)
+    rows = []
+    for field, name in fields.items():
+        if field not in data.columns:
+            continue
+        series = pd.to_numeric(data.set_index("Year")[field], errors="coerce")
+        if series.notna().sum() == 0:
+            continue
+        is_per_share = "PerShare" in field or "EPS" in field
+        is_shares = "Shares" in field
+        divisor = 1 if is_per_share else 1_000_000
+        values = {year: (round(float(series[year]) / divisor, 3)
+                         if year in series.index and pd.notna(series[year]) else None)
+                  for year in years}
+        label = name + (" (shares M)" if is_shares else " (SGD/share)" if is_per_share else " (SGD M)")
+        rows.append({"Metric": label, **values})
+    return pd.DataFrame(rows)
+
+
+def growth_history_frame(records):
+    """Compute YoY growth from reported income-statement values."""
+    if not records:
+        return pd.DataFrame()
+    data = pd.DataFrame(records)
+    if "periodEndDate" not in data:
+        return pd.DataFrame()
+    data["Year"] = pd.to_datetime(data["periodEndDate"], errors="coerce").dt.year
+    data = data.dropna(subset=["Year"]).sort_values("Year").drop_duplicates("Year")
+    years = [str(int(y)) for y in data["Year"].tolist()[::-1]]
+    rows = []
+    for field, label in [("totalRevenue", "Revenue growth YoY (%)"),
+                         ("netIncome", "Net income growth YoY (%)"),
+                         ("dilutedNormalizedEPS", "Normalized diluted EPS growth YoY (%)")]:
+        if field not in data:
+            continue
+        values = pd.to_numeric(data[field], errors="coerce")
+        previous = values.shift(1)
+        growth = ((values / previous) - 1) * 100
+        growth = growth.where(previous > 0)
+        row = {"Metric": label}
+        for year, value in zip(data["Year"], growth):
+            row[str(int(year))] = round(float(value), 2) if pd.notna(value) else None
+        rows.append({"Metric": label, **{year: row.get(year) for year in years}})
+    return pd.DataFrame(rows)
+
+
+def financial_ratios_frame(records):
+    if not records:
+        return pd.DataFrame()
+    record = records[0]
+    percent_fields = {"dividendYield", "returnOnAssets", "netProfitMargin", "longTermDebtEquity"}
+    money_fields = {"totalMarketCap", "totalRevenue", "netIncome"}
+    rows = []
+    for field, label in FINANCIAL_FIELDS["Financial Ratios"].items():
+        value = pd.to_numeric(record.get(field), errors="coerce")
+        if pd.isna(value):
+            continue
+        unit = " (%)" if field in percent_fields else " (SGD M)" if field in money_fields else ""
+        if field in percent_fields:
+            value *= 100
+        if field in money_fields:
+            value /= 1_000_000
+        rows.append({"Metric": label + unit, "Value": round(float(value), 3)})
+    return pd.DataFrame(rows)
+
+
+def show_company_financials(ticker):
+    st.subheader("Historical Financial Statements")
+    st.caption("SGX structured financial data · Annual figures where available · Source attribution: Morningstar StockFacts on SGX")
+    code = normalized_code(ticker)
+    if st.button("Load financial statements", key=f"load_financial_{code}"):
+        st.session_state["financial_loaded_code"] = code
+    if st.session_state.get("financial_loaded_code") != code:
+        st.info("Select 'Load financial statements' to retrieve this company's financial history.")
+        return
+    with st.spinner(f"Loading SGX financial data for {code}..."):
+        results, errors = fetch_company_financials(code)
+    # Independent collapsible sections, all closed by default.
+    for label in ["Income Statement", "Balance Sheet", "Cash Flow", "Financial Ratios", "Growth Rates"]:
+        with st.expander(label, expanded=False):
+            if label == "Growth Rates":
+                frame = growth_history_frame(results.get("Income Statement", []))
+                st.caption("Year-over-year changes; unavailable for the earliest year or non-positive base values.")
+            elif label == "Financial Ratios":
+                frame = financial_ratios_frame(results.get(label, []))
+                st.caption("Latest available snapshot; ratios are not a five-year history.")
+            else:
+                frame = financial_history_frame(results.get(label, []), FINANCIAL_FIELDS[label])
+            if frame.empty:
+                st.warning(f"No {label.lower()} data available for {code} from this API.")
+                if label in errors:
+                    st.caption(f"API request failed: {errors[label]}")
+                continue
+            st.dataframe(frame, hide_index=True, use_container_width=True)
+            st.download_button("Download CSV", frame.to_csv(index=False).encode("utf-8-sig"),
+                               file_name=f"sgx_{code}_{label.lower().replace(' ', '_')}.csv",
+                               mime="text/csv", key=f"financial_csv_{label.replace(' ', '_')}_{code}")
+    st.caption("Missing data is left blank. Figures are not independently audited by this app. Check SGX filings before relying on them.")
+
+
 def company_search_page():
     st.header("Company Search & Sector Peers")
     query = st.text_input("Search company name or SGX ticker", placeholder="DBS, CapitaLand, D05...")
@@ -1156,6 +1351,7 @@ def company_search_page():
                 "Selected stock highlighted in bold"
             )
             peer_table(peers, selected["SGX Code"], "search_peers")
+            show_company_financials(selected["SGX Code"])
             with st.expander("Peer Group Distributions", expanded=False):
                 boxplot_dashboard(
                     peers, key_prefix="company_peers",
