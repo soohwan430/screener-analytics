@@ -1161,34 +1161,75 @@ def fetch_company_financials(ticker):
     return result, errors
 
 
-def financial_history_frame(records, fields):
-    """Build a metric-by-year financial statement, in SGD millions."""
+def humanize_financial_field(field):
+    """Turn SGX camelCase field names into readable statement labels."""
+    import re
+    overrides = {
+        "fiscalYear": "Fiscal Year", "periodEndDate": "Period Ended",
+        "periodLength": "Period Length (months)", "source": "Source",
+        "revenue": "Revenue", "totalRevenue": "Total Revenue",
+        "totalAdminExpenses": "Selling/General/Admin. Expenses, Total",
+        "totalInterest": "Interest Inc.(Exp.), Net-Non-Op., Total",
+        "netOther": "Other, Net", "unusualExpense": "Unusual Expense (Income)",
+        "dilutedAvgShares": "Diluted Weighted Average Shares",
+        "dilutedEPSExclExtraOrd": "Diluted EPS Excluding Extraordinary Items",
+        "commonStockPrimaryIssue": "DPS - Common Stock Primary Issue",
+    }
+    if field in overrides:
+        return overrides[field]
+    name = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", field)
+    name = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", " ", name)
+    return name.replace("E P S", "EPS").replace("E B I T D A", "EBITDA").title()
+
+
+def financial_history_frame(records, fields=None):
+    """Show ALL SGX statement fields in their API order, earliest year first.
+
+    SGX monetary amounts are converted to millions; per-share fields remain
+    in currency/share and share counts are converted to millions.
+    Null data remains visible as an em dash rather than removing the row.
+    """
     if not records:
         return pd.DataFrame()
     data = pd.DataFrame(records)
-    if "periodEndDate" not in data.columns:
+    if "periodEndDate" not in data:
         return pd.DataFrame()
-    data["Year"] = pd.to_datetime(data["periodEndDate"], errors="coerce").dt.strftime("%Y")
-    data = data.dropna(subset=["Year"]).drop_duplicates(subset=["Year"])
+    data["Year"] = pd.to_datetime(data["periodEndDate"], errors="coerce").dt.year
+    data = data.dropna(subset=["Year"]).sort_values("periodEndDate")
+    data = data.drop_duplicates(subset=["Year"], keep="last")
     if data.empty:
         return pd.DataFrame()
-    years = sorted(data["Year"].tolist(), reverse=True)
+    years = [str(int(y)) for y in data["Year"]]
+    by_year = data.set_index("Year")
+    metadata = {"currencyId", "reportingCurrency", "lastUpdatedTime", "Year"}
     rows = []
-    for field, name in fields.items():
-        if field not in data.columns:
+    for field in data.columns:
+        if field in metadata:
             continue
-        series = pd.to_numeric(data.set_index("Year")[field], errors="coerce")
-        if series.notna().sum() == 0:
-            continue
-        is_per_share = "PerShare" in field or "EPS" in field
-        is_shares = "Shares" in field
-        divisor = 1 if is_per_share else 1_000_000
-        values = {year: (round(float(series[year]) / divisor, 3)
-                         if year in series.index and pd.notna(series[year]) else None)
-                  for year in years}
-        label = name + (" (shares M)" if is_shares else " (SGD/share)" if is_per_share else " (SGD M)")
-        rows.append({"Metric": label, **values})
-    return pd.DataFrame(rows)
+        label = humanize_financial_field(field)
+        is_meta = field in {"fiscalYear", "periodEndDate", "periodLength", "source"}
+        is_per_share = "PerShare" in field or "EPS" in field or field == "commonStockPrimaryIssue"
+        is_shares = "Shares" in field or field == "dilutedAvgShares"
+        if not is_meta:
+            label += " (per share)" if is_per_share else " (shares M)" if is_shares else " (M)"
+        row = {"Metric": label}
+        for year in years:
+            value = by_year.loc[int(year), field]
+            if pd.isna(value) or value == "":
+                row[year] = "—"
+            elif field == "periodEndDate":
+                row[year] = pd.to_datetime(value).strftime("%d %b %Y")
+            elif is_meta:
+                row[year] = str(value)
+            else:
+                number = pd.to_numeric(value, errors="coerce")
+                if pd.isna(number):
+                    row[year] = str(value)
+                else:
+                    divisor = 1 if is_per_share else 1_000_000
+                    row[year] = f"{float(number) / divisor:,.2f}"
+        rows.append(row)
+    return pd.DataFrame(rows, columns=["Metric", *years])
 
 
 def growth_history_frame(records):
@@ -1200,7 +1241,7 @@ def growth_history_frame(records):
         return pd.DataFrame()
     data["Year"] = pd.to_datetime(data["periodEndDate"], errors="coerce").dt.year
     data = data.dropna(subset=["Year"]).sort_values("Year").drop_duplicates("Year")
-    years = [str(int(y)) for y in data["Year"].tolist()[::-1]]
+    years = [str(int(y)) for y in data["Year"].tolist()]
     rows = []
     for field, label in [("totalRevenue", "Revenue growth YoY (%)"),
                          ("netIncome", "Net income growth YoY (%)"),
@@ -1225,22 +1266,26 @@ def financial_ratios_frame(records):
     percent_fields = {"dividendYield", "returnOnAssets", "netProfitMargin", "longTermDebtEquity"}
     money_fields = {"totalMarketCap", "totalRevenue", "netIncome"}
     rows = []
-    for field, label in FINANCIAL_FIELDS["Financial Ratios"].items():
-        value = pd.to_numeric(record.get(field), errors="coerce")
-        if pd.isna(value):
+    for field, raw in record.items():
+        if field in {"currencyId", "lastUpdatedTime"}:
             continue
-        unit = " (%)" if field in percent_fields else " (SGD M)" if field in money_fields else ""
+        label = humanize_financial_field(field)
+        value = pd.to_numeric(raw, errors="coerce")
+        if pd.isna(value):
+            rows.append({"Metric": label, "Value": "—"})
+            continue
+        unit = " (%)" if field in percent_fields else " (M)" if field in money_fields else ""
         if field in percent_fields:
             value *= 100
         if field in money_fields:
             value /= 1_000_000
-        rows.append({"Metric": label + unit, "Value": round(float(value), 3)})
+        rows.append({"Metric": label + unit, "Value": f"{float(value):,.3f}"})
     return pd.DataFrame(rows)
 
 
 def show_company_financials(ticker):
     st.subheader("Historical Financial Statements")
-    st.caption("SGX structured financial data · Annual figures where available · Source attribution: Morningstar StockFacts on SGX")
+    st.caption("SGX structured financial data · All reported statement line items · Oldest year first · Monetary figures in millions (reporting currency varies by company) · Source: SGX/Morningstar")
     code = normalized_code(ticker)
     if st.button("Load financial statements", key=f"load_financial_{code}"):
         st.session_state["financial_loaded_code"] = code
@@ -1257,7 +1302,7 @@ def show_company_financials(ticker):
                 st.caption("Year-over-year changes; unavailable for the earliest year or non-positive base values.")
             elif label == "Financial Ratios":
                 frame = financial_ratios_frame(results.get(label, []))
-                st.caption("Latest available snapshot; ratios are not a five-year history.")
+                st.caption("Latest available snapshot; ratios are not a five-year history. Missing values are shown as —.")
             else:
                 frame = financial_history_frame(results.get(label, []), FINANCIAL_FIELDS[label])
             if frame.empty:
@@ -1265,11 +1310,11 @@ def show_company_financials(ticker):
                 if label in errors:
                     st.caption(f"API request failed: {errors[label]}")
                 continue
-            st.dataframe(frame, hide_index=True, use_container_width=True)
+            st.dataframe(frame, hide_index=True, use_container_width=True, height=min(1200, 40 + 36 * len(frame)))
             st.download_button("Download CSV", frame.to_csv(index=False).encode("utf-8-sig"),
                                file_name=f"sgx_{code}_{label.lower().replace(' ', '_')}.csv",
                                mime="text/csv", key=f"financial_csv_{label.replace(' ', '_')}_{code}")
-    st.caption("Missing data is left blank. Figures are not independently audited by this app. Check SGX filings before relying on them.")
+    st.caption("— means unavailable. Amounts are displayed in millions of the reporting currency; per-share values are unscaled. Verify reporting currency and figures against company filings.")
 
 
 def company_search_page():
