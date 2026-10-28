@@ -1223,6 +1223,51 @@ def financial_history_frame(records, fields=None):
     return pd.DataFrame(rows, columns=["Metric", *years])
 
 
+
+def financial_export_frame(records):
+    """Analysis-ready wide table: numeric cells, blank missing values, no metadata."""
+    if not records:
+        return pd.DataFrame()
+    data = pd.DataFrame(records)
+    if "periodEndDate" not in data.columns:
+        return pd.DataFrame()
+    data["Year"] = pd.to_datetime(data["periodEndDate"], errors="coerce").dt.year
+    data = data.dropna(subset=["Year"]).sort_values("periodEndDate")
+    data = data.drop_duplicates(subset=["Year"], keep="last")
+    if data.empty:
+        return pd.DataFrame()
+
+    years = [str(int(y)) for y in data["Year"]]
+    excluded = {
+        "Year", "fiscalYear", "periodEndDate", "periodLength", "source",
+        "currencyId", "reportingCurrency", "lastUpdatedTime",
+        "totalLiabilitiesEquity",  # SGX field can incorrectly duplicate equity.
+    }
+    # When revenue and totalRevenue are identical, keep only Total Revenue.
+    if "revenue" in data and "totalRevenue" in data:
+        a = pd.to_numeric(data["revenue"], errors="coerce")
+        b = pd.to_numeric(data["totalRevenue"], errors="coerce")
+        if a.equals(b):
+            excluded.add("revenue")
+
+    rows = []
+    for field in data.columns:
+        if field in excluded:
+            continue
+        values = pd.to_numeric(data[field], errors="coerce")
+        if values.notna().sum() == 0:
+            continue  # Drop metrics unavailable in every year.
+        is_per_share = "PerShare" in field or "EPS" in field or field == "commonStockPrimaryIssue"
+        is_shares = "Shares" in field or field == "dilutedAvgShares"
+        unit = " (per share)" if is_per_share else " (shares M)" if is_shares else " (M)"
+        divisor = 1 if is_per_share else 1_000_000
+        row = {"Metric": humanize_financial_field(field) + unit}
+        for year, value in zip(years, values):
+            row[year] = round(float(value) / divisor, 6) if pd.notna(value) else None
+        rows.append(row)
+    return pd.DataFrame(rows, columns=["Metric", *years])
+
+
 def show_company_financials(ticker):
     st.subheader("Historical Financial Statements")
     st.caption(
@@ -1249,9 +1294,10 @@ def show_company_financials(ticker):
                     frame, hide_index=True, use_container_width=True,
                     height=min(1200, 40 + 36 * len(frame)),
                 )
-                export_frame = frame.copy()
-                export_frame.insert(0, "Statement", label)
-                combined_frames.append(export_frame)
+                export_frame = financial_export_frame(results.get(label, []))
+                if not export_frame.empty:
+                    export_frame.insert(0, "Statement", label)
+                    combined_frames.append(export_frame)
 
         if combined_frames:
             combined = pd.concat(combined_frames, ignore_index=True)
@@ -1259,10 +1305,11 @@ def show_company_financials(ticker):
                 (col for col in combined.columns if col not in {"Statement", "Metric"}),
                 key=int,
             )
-            combined = combined[["Statement", "Metric", *year_columns]].fillna("—")
+            combined = combined[["Statement", "Metric", *year_columns]]
+            # Blank CSV cells are true missing values, not text placeholders.
             st.download_button(
                 "Download all 3 statements (CSV)",
-                data=combined.to_csv(index=False).encode("utf-8-sig"),
+                data=combined.to_csv(index=False, na_rep="", float_format="%.6f").encode("utf-8-sig"),
                 file_name=f"sgx_{code}_three_financial_statements.csv",
                 mime="text/csv",
                 key=f"financial_csv_combined_{code}",
