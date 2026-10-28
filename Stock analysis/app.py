@@ -1300,16 +1300,32 @@ def show_company_financials(ticker):
                     combined_frames.append(export_frame)
 
         if combined_frames:
-            combined = pd.concat(combined_frames, ignore_index=True)
-            year_columns = sorted(
-                (col for col in combined.columns if col not in {"Statement", "Metric"}),
+            import csv
+            import io
+
+            output = io.StringIO(newline="")
+            writer = csv.writer(output)
+            all_years = sorted(
+                {col for frame in combined_frames for col in frame.columns
+                 if col not in {"Statement", "Metric"}},
                 key=int,
             )
-            combined = combined[["Statement", "Metric", *year_columns]]
-            # Blank CSV cells are true missing values, not text placeholders.
+            for index, frame in enumerate(combined_frames):
+                if index:
+                    writer.writerow([])  # Separate the three statements.
+                statement = frame["Statement"].iloc[0]
+                writer.writerow([statement])
+                writer.writerow(["Metric", *all_years])
+                for _, record in frame.iterrows():
+                    values = []
+                    for year in all_years:
+                        value = record.get(year)
+                        values.append("" if pd.isna(value) else value)
+                    writer.writerow([record["Metric"], *values])
+
             st.download_button(
                 "Download all 3 statements (CSV)",
-                data=combined.to_csv(index=False, na_rep="", float_format="%.6f").encode("utf-8-sig"),
+                data=output.getvalue().encode("utf-8-sig"),
                 file_name=f"sgx_{code}_three_financial_statements.csv",
                 mime="text/csv",
                 key=f"financial_csv_combined_{code}",
