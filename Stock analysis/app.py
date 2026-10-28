@@ -1231,12 +1231,6 @@ def show_company_financials(ticker):
         "by company) · Source: SGX/Morningstar"
     )
     code = normalized_code(ticker)
-    if st.button("Load financial statements", key=f"load_financial_{code}"):
-        st.session_state["financial_loaded_code"] = code
-    if st.session_state.get("financial_loaded_code") != code:
-        st.info("Select 'Load financial statements' to retrieve this company's financial history.")
-        return
-
     with st.spinner(f"Loading SGX financial data for {code}..."):
         results, errors = fetch_company_financials(code)
 
