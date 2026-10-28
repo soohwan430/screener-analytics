@@ -1225,29 +1225,59 @@ def financial_history_frame(records, fields=None):
 
 def show_company_financials(ticker):
     st.subheader("Historical Financial Statements")
-    st.caption("SGX structured financial data · All reported statement line items · Oldest year first · Monetary figures in millions (reporting currency varies by company) · Source: SGX/Morningstar")
+    st.caption(
+        "SGX structured financial data · All reported statement line items · "
+        "Oldest year first · Monetary figures in millions (reporting currency varies "
+        "by company) · Source: SGX/Morningstar"
+    )
     code = normalized_code(ticker)
     if st.button("Load financial statements", key=f"load_financial_{code}"):
         st.session_state["financial_loaded_code"] = code
     if st.session_state.get("financial_loaded_code") != code:
         st.info("Select 'Load financial statements' to retrieve this company's financial history.")
         return
+
     with st.spinner(f"Loading SGX financial data for {code}..."):
         results, errors = fetch_company_financials(code)
-    # Independent collapsible sections, all closed by default.
-    for label in ["Income Statement", "Balance Sheet", "Cash Flow"]:
-        with st.expander(label, expanded=False):
+
+    statement_names = ["Income Statement", "Balance Sheet", "Cash Flow"]
+    combined_frames = []
+    with st.expander("Financial Statements (Income, Balance Sheet & Cash Flow)", expanded=False):
+        for label in statement_names:
+            st.markdown(f"#### {label}")
             frame = financial_history_frame(results.get(label, []), FINANCIAL_FIELDS[label])
             if frame.empty:
                 st.warning(f"No {label.lower()} data available for {code} from this API.")
                 if label in errors:
                     st.caption(f"API request failed: {errors[label]}")
-                continue
-            st.dataframe(frame, hide_index=True, use_container_width=True, height=min(1200, 40 + 36 * len(frame)))
-            st.download_button("Download CSV", frame.to_csv(index=False).encode("utf-8-sig"),
-                               file_name=f"sgx_{code}_{label.lower().replace(' ', '_')}.csv",
-                               mime="text/csv", key=f"financial_csv_{label.replace(' ', '_')}_{code}")
-    st.caption("— means unavailable. Amounts are displayed in millions of the reporting currency; per-share values are unscaled. Verify reporting currency and figures against company filings.")
+            else:
+                st.dataframe(
+                    frame, hide_index=True, use_container_width=True,
+                    height=min(1200, 40 + 36 * len(frame)),
+                )
+                export_frame = frame.copy()
+                export_frame.insert(0, "Statement", label)
+                combined_frames.append(export_frame)
+
+        if combined_frames:
+            combined = pd.concat(combined_frames, ignore_index=True)
+            year_columns = sorted(
+                (col for col in combined.columns if col not in {"Statement", "Metric"}),
+                key=int,
+            )
+            combined = combined[["Statement", "Metric", *year_columns]].fillna("—")
+            st.download_button(
+                "Download all 3 statements (CSV)",
+                data=combined.to_csv(index=False).encode("utf-8-sig"),
+                file_name=f"sgx_{code}_three_financial_statements.csv",
+                mime="text/csv",
+                key=f"financial_csv_combined_{code}",
+            )
+    st.caption(
+        "— means unavailable. Amounts are displayed in millions of the reporting "
+        "currency; per-share values are unscaled. Verify reporting currency and "
+        "figures against company filings."
+    )
 
 
 def company_search_page():
